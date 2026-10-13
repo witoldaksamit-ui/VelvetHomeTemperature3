@@ -57,8 +57,7 @@ dependencies {
     // Konwerter do pobierania surowego tekstu z pliku .txt
     implementation("com.squareup.retrofit2:converter-scalars:2.11.0")
 
-    // --- POPRAWIONE BIBLIOTEKI DO WYKRESÓW (VICO) ---
-    implementation("com.patrykandpatrick.vico:compose:2.0.0-alpha.28")
-    implementation("com.patrykandpatrick.vico:compose-m3:2.0.0-alpha.28")
-    implementation("com.patrykandpatrick.vico:core:2.0.0-alpha.28")
+
+
+
 }

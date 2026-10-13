@@ -17,15 +17,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.patrykandpatrick.vico.compose.cartesian.*
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberBottomAxis
-import com.patrykandpatrick.vico.compose.cartesian.axis.rememberStartAxis
-import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLine
-import com.patrykandpatrick.vico.compose.cartesian.layer.rememberLineCartesianLayer
-import com.patrykandpatrick.vico.core.cartesian.Zoom
-import com.patrykandpatrick.vico.core.cartesian.data.*
-import com.patrykandpatrick.vico.core.cartesian.layer.LineCartesianLayer
-import com.patrykandpatrick.vico.core.common.Fill
+
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -35,6 +27,17 @@ import retrofit2.http.GET
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
+import java.time.Instant
 
 
 // 1. Definicja interfejsu sieciowego dla Retrofit (Pobieranie z Raw GitHub)
@@ -227,12 +230,15 @@ fun TemperatureChart(
     selector: (TemperatureEntry) -> Float,
     lineColor: Color
 ) {
-    val model = remember(entries) {
-        val xValues = entries.indices.map { it.toFloat() }
-        val yValues = entries.map(selector)
-        CartesianChartModel(LineCartesianLayerModel.build { series(xValues, yValues) })
-    }
+    val textMeasurer = rememberTextMeasurer()
+    val labelStyle = TextStyle(fontSize = 11.sp, color = Color.Gray)
 
+    val values = remember(entries) { entries.map(selector) }
+    val minV = values.min()
+    val maxV = values.max()
+    val pad = ((maxV - minV) * 0.1f).coerceAtLeast(0.5f)
+    val yMin = minV - pad
+    val yMax = maxV + pad
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Text(
@@ -242,22 +248,76 @@ fun TemperatureChart(
             modifier = Modifier.padding(bottom = 8.dp)
         )
 
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(200.dp)
+        ) {
+            val left = 44.dp.toPx()
+            val right = 16.dp.toPx()
+            val top = 8.dp.toPx()
+            val bottom = 24.dp.toPx()
+            val w = size.width - left - right
+            val h = size.height - top - bottom
 
-        CartesianChartHost(
-            chart = rememberCartesianChart(
-                rememberLineCartesianLayer(
-                    lineProvider = LineCartesianLayer.LineProvider.series(
-                        rememberLine(
-                            fill = LineCartesianLayer.LineFill.single(Fill(lineColor.toArgb()))
-                        )
+            val t0 = entries.first().timestamp.toEpochSecond()
+            val span = (entries.last().timestamp.toEpochSecond() - t0).coerceAtLeast(1L)
+
+            fun xOf(e: TemperatureEntry) =
+                left + (e.timestamp.toEpochSecond() - t0).toFloat() / span * w
+
+            fun yOf(v: Float) =
+                top + (1f - (v - yMin) / (yMax - yMin)) * h
+
+            // Etykiety osi Y (5 wartości)
+            for (i in 0..4) {
+                val v = yMin + (yMax - yMin) * i / 4f
+                val layout = textMeasurer.measure("%.1f".format(v), labelStyle)
+                drawText(
+                    layout,
+                    topLeft = Offset(
+                        left - layout.size.width - 6.dp.toPx(),
+                        yOf(v) - layout.size.height / 2f
                     )
-                ),
-                startAxis = rememberStartAxis(guideline = null),  // Brak poziomych linii siatki
-                bottomAxis = rememberBottomAxis(guideline = null) // Brak pionowych linii siatki
-            ),
-            model = model,
-            zoomState = rememberVicoZoomState(initialZoom = Zoom.Content)
-        )
+                )
+            }
+
+            // Etykiety osi X (początek, środek, koniec)
+            val fmt = DateTimeFormatter.ofPattern("HH:mm")
+            for (i in 0..2) {
+                val ts = t0 + span * i / 2
+                val text = Instant.ofEpochSecond(ts)
+                    .atZone(ZoneId.systemDefault())
+                    .format(fmt)
+                val layout = textMeasurer.measure(text, labelStyle)
+                val cx = left + w * i / 2f
+                drawText(
+                    layout,
+                    topLeft = Offset(
+                        (cx - layout.size.width / 2f)
+                            .coerceIn(0f, size.width - layout.size.width),
+                        size.height - bottom + 4.dp.toPx()
+                    )
+                )
+            }
+
+            // Linia wykresu
+            val path = Path()
+            entries.forEachIndexed { i, e ->
+                val px = xOf(e)
+                val py = yOf(selector(e))
+                if (i == 0) path.moveTo(px, py) else path.lineTo(px, py)
+            }
+            drawPath(
+                path = path,
+                color = lineColor,
+                style = Stroke(
+                    width = 2.dp.toPx(),
+                    cap = StrokeCap.Round,
+                    join = StrokeJoin.Round
+                )
+            )
+        }
     }
 }
 
