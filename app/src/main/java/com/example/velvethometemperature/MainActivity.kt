@@ -1,6 +1,5 @@
 package com.example.velvethometemperature
 
-
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -13,11 +12,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -28,24 +25,24 @@ import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 
-import androidx.compose.foundation.Canvas
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
+import androidx.compose.ui.geometry.Offset
+
+import androidx.compose.foundation.Canvas
 import androidx.compose.ui.text.rememberTextMeasurer
-import java.time.Instant
+import androidx.compose.ui.text.TextStyle
 
 
-// 1. Definicja interfejsu sieciowego dla Retrofit (Pobieranie z Raw GitHub)
+
+// 1. Definicja interfejsu sieciowego dla Retrofit
 interface TemperatureApi {
     @GET("witoldaksamit-ui/velvethome.github.io/main/temperatures.txt")
     suspend fun getRawData(): String
 }
-
 
 // 2. Model danych dla jednego pomiaru temperatury
 data class TemperatureEntry(
@@ -54,6 +51,12 @@ data class TemperatureEntry(
     val tempOut: Float
 )
 
+// Definicja dostępnych zakresów czasowych
+enum class TimeRange(val hours: Long, val label: String) {
+    LAST_24H(24L, "Ostatnie 24h"),
+    LAST_12H(12L, "Ostatnie 12h"),
+    LAST_6H(6L, "Ostatnie 6h")
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,8 +74,6 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-
-// Splash screen + przejście do głównego ekranu
 @Composable
 fun SplashScreen() {
     Box(
@@ -88,29 +89,65 @@ fun SplashScreen() {
     }
 }
 
-
 @Composable
 fun AppRoot() {
     var showSplash by rememberSaveable { mutableStateOf(true) }
 
-
     LaunchedEffect(Unit) {
-        delay(2000) // czas wyświetlania splasha w ms
+        delay(2000)
         showSplash = false
     }
-
 
     if (showSplash) SplashScreen() else TemperatureScreen()
 }
 
+// Dummy funkcja parsowania (zamień na swoją właściwą implementację)
+fun parseCsvData(rawText: String): List<TemperatureEntry> {
+    val entries = mutableListOf<TemperatureEntry>()
+
+    // Formater dopasowany do Twojego formatu: 2026-10-13T03:50:34+02:00
+    val formatter = DateTimeFormatter.ISO_DATE_TIME
+
+    val lines = rawText.lines()
+
+    for (line in lines) {
+        val trimmed = line.trim()
+        if (trimmed.isEmpty()) continue
+
+        try {
+            val tokens = trimmed.split(",")
+
+            if (tokens.size >= 3) {
+                // tokens[0] = "2026-10-13T03:50:34+02:00"
+                // tokens[1] = "19.125" (Dom)
+                // tokens[2] = "8.19" (Dwór)
+
+                val timestamp = ZonedDateTime.parse(tokens[0].trim(), formatter)
+                val tempIn = tokens[1].trim().toFloat()
+                val tempOut = tokens[2].trim().toFloat()
+
+                entries.add(TemperatureEntry(timestamp, tempIn, tempOut))
+            }
+        } catch (e: Exception) {
+            // Logowanie błędu parsowania konkretnej linii w celu łatwiejszego debugowania
+            android.util.Log.e("CSV_PARSE", "Błąd w linii: $trimmed", e)
+        }
+    }
+
+    return entries.sortedBy { it.timestamp }
+}
 
 // 3. Główny ekran aplikacji zarządzający stanem
 @Composable
 fun TemperatureScreen() {
     var isLoading by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
-    var temperatureList by remember { mutableStateOf<List<TemperatureEntry>>(emptyList()) }
 
+    // Przechowujemy pełną listę pobranych wpisów
+    var allTemperatures by remember { mutableStateOf<List<TemperatureEntry>>(emptyList()) }
+
+    // Stan wybranego zakresu czasu (domyślnie 24h)
+    var selectedRange by remember { mutableStateOf(TimeRange.LAST_24H) }
 
     LaunchedEffect(Unit) {
         try {
@@ -119,18 +156,13 @@ fun TemperatureScreen() {
                 .addConverterFactory(ScalarsConverterFactory.create())
                 .build()
 
-
             val api = retrofit.create(TemperatureApi::class.java)
 
-
-            // Pobieranie danych w tle
             val rawText = withContext(Dispatchers.IO) {
                 api.getRawData()
             }
 
-
-            // Parsowanie i filtrowanie ostatnich 24 godzin
-            temperatureList = parseCsvData(rawText)
+            allTemperatures = parseCsvData(rawText)
             isLoading = false
         } catch (e: Exception) {
             errorMessage = "Błąd pobierania danych: ${e.localizedMessage}"
@@ -138,8 +170,17 @@ fun TemperatureScreen() {
         }
     }
 
+    // Dynamicznie przefiltrowana lista na podstawie zaznaczonego przycisku zakresu
+    val filteredTemperatures = remember(allTemperatures, selectedRange) {
+        if (allTemperatures.isEmpty()) return@remember emptyList()
 
-    // Wygląd interfejsu użytkownika (UI)
+        // Wyznaczamy granicę czasową na podstawie najnowszego pomiaru w pliku
+        val latestTime = allTemperatures.maxByOrNull { it.timestamp }?.timestamp ?: ZonedDateTime.now()
+        val cutoffTime = latestTime.minusHours(selectedRange.hours)
+
+        allTemperatures.filter { it.timestamp.isAfter(cutoffTime) || it.timestamp.isEqual(cutoffTime) }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -147,13 +188,28 @@ fun TemperatureScreen() {
             .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        // --- PRZYCISKI ZAKRESU OSI X ---
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            TimeRange.values().forEach { range ->
+                FilterChip(
+                    selected = selectedRange == range,
+                    onClick = { selectedRange = range },
+                    label = { Text(range.label, fontSize = 12.sp) }
+                )
+            }
+        }
+
         Text(
-            text = "Temperatura z ostatnich 24h",
+            text = "Temperatura – ${selectedRange.label}",
             fontSize = 20.sp,
             fontWeight = FontWeight.Bold,
             modifier = Modifier.padding(bottom = 24.dp)
         )
-
 
         when {
             isLoading -> {
@@ -162,14 +218,18 @@ fun TemperatureScreen() {
             errorMessage != null -> {
                 Text(text = errorMessage!!, color = Color.Red, fontSize = 16.sp)
             }
-            temperatureList.isEmpty() -> {
-                Text(text = "Brak danych z ostatnich 24 godzin.", fontSize = 16.sp)
+            allTemperatures.isEmpty() -> {
+                Text(text = "Brak danych pomiarowych.", fontSize = 16.sp)
+            }
+            filteredTemperatures.isEmpty() -> {
+                Text(text = "Brak danych dla wybranego zakresu.", fontSize = 16.sp)
             }
             else -> {
-                // Wyświetlanie aktualnych (ostatnich) temperatur nad wykresami
-                val latest = temperatureList.last()
+                val latest = allTemperatures.last()
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 16.dp),
                     horizontalArrangement = Arrangement.SpaceAround
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -182,8 +242,6 @@ fun TemperatureScreen() {
                     }
                 }
 
-
-                // Data i godzina ostatniej aktualizacji danych
                 val lastUpdate = latest.timestamp
                     .withZoneSameInstant(ZoneId.systemDefault())
                     .format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"))
@@ -193,26 +251,22 @@ fun TemperatureScreen() {
                     color = Color.Gray
                 )
 
-
                 Spacer(modifier = Modifier.height(16.dp))
 
-
-                // Wykres 1: temperatura w domu
+                // Wykres 1: temperatura w domu (zasilany przefiltrowanymi danymi)
                 TemperatureChart(
                     title = "Dom",
-                    entries = temperatureList,
+                    entries = filteredTemperatures,
                     selector = { it.tempIn },
                     lineColor = Color(0xFF4CAF50)
                 )
 
-
                 Spacer(modifier = Modifier.height(24.dp))
 
-
-                // Wykres 2: temperatura na dworze
+                // Wykres 2: temperatura na dworze (zasilany przefiltrowanymi danymi)
                 TemperatureChart(
                     title = "Dwór",
-                    entries = temperatureList,
+                    entries = filteredTemperatures,
                     selector = { it.tempOut },
                     lineColor = Color(0xFF2196F3)
                 )
@@ -221,8 +275,7 @@ fun TemperatureScreen() {
     }
 }
 
-
-// 4. Komponent wykresu z WYŁĄCZONĄ siatką w wersji Vico 2.x
+// 4. Komponent wykresu
 @Composable
 fun TemperatureChart(
     title: String,
@@ -232,8 +285,12 @@ fun TemperatureChart(
 ) {
     val textMeasurer = rememberTextMeasurer()
     val labelStyle = TextStyle(fontSize = 11.sp, color = Color.Gray)
+    val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
 
     val values = remember(entries) { entries.map(selector) }
+    if (values.isEmpty()) return
+
+    // Wyznaczanie zakresu osi Y z małym marginesem
     val minV = values.min()
     val maxV = values.max()
     val pad = ((maxV - minV) * 0.1f).coerceAtLeast(0.5f)
@@ -253,101 +310,80 @@ fun TemperatureChart(
                 .fillMaxWidth()
                 .height(200.dp)
         ) {
+            // Marginesy wykresu (w pikselach)
             val left = 44.dp.toPx()
             val right = 16.dp.toPx()
             val top = 8.dp.toPx()
             val bottom = 24.dp.toPx()
-            val w = size.width - left - right
-            val h = size.height - top - bottom
 
-            val t0 = entries.first().timestamp.toEpochSecond()
-            val span = (entries.last().timestamp.toEpochSecond() - t0).coerceAtLeast(1L)
+            val chartWidth = size.width - left - right
+            val chartHeight = size.height - top - bottom
 
-            fun xOf(e: TemperatureEntry) =
-                left + (e.timestamp.toEpochSecond() - t0).toFloat() / span * w
+            if (entries.size < 2) return@Canvas
 
-            fun yOf(v: Float) =
-                top + (1f - (v - yMin) / (yMax - yMin)) * h
+            // --- RYSOWANIE OSI Y (Wartości temperatur) ---
+            val yLabelsCount = 4
+            for (i in 0 until yLabelsCount) {
+                val fraction = i.toFloat() / (yLabelsCount - 1)
+                val value = yMax - fraction * (yMax - yMin)
+                val y = top + fraction * chartHeight
 
-            // Etykiety osi Y (5 wartości)
-            for (i in 0..4) {
-                val v = yMin + (yMax - yMin) * i / 4f
-                val layout = textMeasurer.measure("%.1f".format(v), labelStyle)
                 drawText(
-                    layout,
-                    topLeft = Offset(
-                        left - layout.size.width - 6.dp.toPx(),
-                        yOf(v) - layout.size.height / 2f
-                    )
+                    textMeasurer = textMeasurer,
+                    text = String.format("%.1f°C", value),
+                    style = labelStyle,
+                    topLeft = Offset(4.dp.toPx(), y - 8.dp.toPx())
                 )
             }
 
-            // Etykiety osi X (początek, środek, koniec)
-            val fmt = DateTimeFormatter.ofPattern("HH:mm")
-            for (i in 0..2) {
-                val ts = t0 + span * i / 2
-                val text = Instant.ofEpochSecond(ts)
-                    .atZone(ZoneId.systemDefault())
-                    .format(fmt)
-                val layout = textMeasurer.measure(text, labelStyle)
-                val cx = left + w * i / 2f
+            // --- RYSOWANIE OSI X (Godziny) ---
+            val xLabelsCount = 4
+            for (i in 0 until xLabelsCount) {
+                val fraction = i.toFloat() / (xLabelsCount - 1)
+                val index = (fraction * (entries.size - 1)).toInt()
+                val entry = entries[index]
+                val x = left + fraction * chartWidth
+
+                val timeStr = entry.timestamp.format(timeFormatter)
                 drawText(
-                    layout,
-                    topLeft = Offset(
-                        (cx - layout.size.width / 2f)
-                            .coerceIn(0f, size.width - layout.size.width),
-                        size.height - bottom + 4.dp.toPx()
-                    )
+                    textMeasurer = textMeasurer,
+                    text = timeStr,
+                    style = labelStyle,
+                    topLeft = Offset(x - 12.dp.toPx(), size.height - 20.dp.toPx())
                 )
             }
 
-            // Linia wykresu
+            // --- OBLICZANIE I RYSOWANIE LINII WYKRESU ---
             val path = Path()
-            entries.forEachIndexed { i, e ->
-                val px = xOf(e)
-                val py = yOf(selector(e))
-                if (i == 0) path.moveTo(px, py) else path.lineTo(px, py)
+            for (i in entries.indices) {
+                val entry = entries[i]
+                val value = selector(entry)
+
+                // Skalowanie osi X (pozycja punktu w czasie)
+                val xFraction = i.toFloat() / (entries.size - 1)
+                val x = left + xFraction * chartWidth
+
+                // Skalowanie osi Y (wysokość punktu dla temperatury)
+                val yFraction = (value - yMin) / (yMax - yMin)
+                val y = top + (1f - yFraction) * chartHeight
+
+                if (i == 0) {
+                    path.moveTo(x, y)
+                } else {
+                    path.lineTo(x, y)
+                }
             }
+
+            // Nakładamy linię na Canvas
             drawPath(
                 path = path,
                 color = lineColor,
                 style = Stroke(
-                    width = 2.dp.toPx(),
+                    width = 3.dp.toPx(),
                     cap = StrokeCap.Round,
                     join = StrokeJoin.Round
                 )
             )
         }
     }
-}
-
-
-// 5. Funkcja parsująca pobrany tekst CSV/TXT (Dokończona)
-fun parseCsvData(rawText: String): List<TemperatureEntry> {
-    val now = ZonedDateTime.now()
-    val twentyFourHoursAgo = now.minusHours(24)
-    val entries = mutableListOf<TemperatureEntry>()
-
-
-    rawText.lineSequence().forEach { line ->
-        if (line.isNotBlank()) {
-            try {
-                val columns = line.split(",")
-                if (columns.size >= 3) {
-                    val timestamp = ZonedDateTime.parse(columns[0].trim())
-                    val tempIn = columns[1].trim().toFloat()
-                    val tempOut = columns[2].trim().toFloat()
-
-
-                    // Filtrowanie wpisów tylko z ostatnich 24 godzin
-                    if (timestamp.isAfter(twentyFourHoursAgo)) {
-                        entries.add(TemperatureEntry(timestamp, tempIn, tempOut))
-                    }
-                }
-            } catch (e: Exception) {
-                // Pomiń niepoprawnie sformatowane linie danych
-            }
-        }
-    }
-    return entries
 }
