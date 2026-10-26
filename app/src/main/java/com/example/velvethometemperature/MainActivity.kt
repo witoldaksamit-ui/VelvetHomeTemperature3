@@ -51,6 +51,9 @@ import java.time.format.DateTimeFormatter
 // Miękka krzywa łagodzenia (odpowiednik EaseInOutSine)
 val SoftEasing = CubicBezierEasing(0.37f, 0f, 0.63f, 1f)
 
+// Wspólne tło aksamitne (używane na wszystkich ekranach)
+val VelvetBackground = Brush.verticalGradient(listOf(Color(0xFF4A1233), Color(0xFF1A0613)))
+
 // 1. Definicje interfejsów sieciowych dla Retrofit
 interface TemperatureApi {
     @GET("witoldaksamit-ui/velvethome.github.io/main/temperatures.txt")
@@ -130,9 +133,7 @@ fun SplashScreen() {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(listOf(Color(0xFF4A1233), Color(0xFF1A0613)))
-            ),
+            .background(VelvetBackground),
         contentAlignment = Alignment.Center
     ) {
         Column(
@@ -277,9 +278,7 @@ fun MenuScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                Brush.verticalGradient(listOf(Color(0xFF4A1233), Color(0xFF1A0613)))
-            ),
+            .background(VelvetBackground),
         contentAlignment = Alignment.Center
     ) {
         Column(
@@ -375,6 +374,8 @@ fun TemperatureScreen(onBackToMenu: () -> Unit) {
     var allTemperatures by remember { mutableStateOf<List<TemperatureEntry>>(emptyList()) }
     var selectedRange by remember { mutableStateOf(TimeRange.LAST_24H) }
     val cream = Color(0xFFF7E9D7)
+    val gold = Color(0xFFFFC96B)
+    val mutedText = cream.copy(alpha = 0.7f)
 
     LaunchedEffect(Unit) {
         try {
@@ -411,6 +412,7 @@ fun TemperatureScreen(onBackToMenu: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(VelvetBackground)
             .statusBarsPadding()
             .navigationBarsPadding()
             .verticalScroll(rememberScrollState())
@@ -439,7 +441,19 @@ fun TemperatureScreen(onBackToMenu: () -> Unit) {
                 FilterChip(
                     selected = selectedRange == range,
                     onClick = { selectedRange = range },
-                    label = { Text(range.label, fontSize = 12.sp) }
+                    label = { Text(range.label, fontSize = 12.sp) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        containerColor = Color.Transparent,
+                        labelColor = cream,
+                        selectedContainerColor = Color(0xFF9C2A5E),
+                        selectedLabelColor = cream
+                    ),
+                    border = FilterChipDefaults.filterChipBorder(
+                        enabled = true,
+                        selected = selectedRange == range,
+                        borderColor = cream.copy(alpha = 0.5f),
+                        selectedBorderColor = gold
+                    )
                 )
             }
         }
@@ -451,7 +465,7 @@ fun TemperatureScreen(onBackToMenu: () -> Unit) {
             Text(
                 text = "Ostatnia aktualizacja: $lastUpdate",
                 fontSize = 14.sp,
-                color = Color.Gray
+                color = mutedText
             )
             Spacer(modifier = Modifier.height(4.dp))
         }
@@ -460,21 +474,25 @@ fun TemperatureScreen(onBackToMenu: () -> Unit) {
             text = "Temperatura – ${selectedRange.label}",
             fontSize = 20.sp,
             fontWeight = FontWeight.Bold,
+            color = cream,
             modifier = Modifier.padding(bottom = 16.dp)
         )
 
         when {
             isLoading -> {
-                CircularProgressIndicator(modifier = Modifier.align(Alignment.CenterHorizontally))
+                CircularProgressIndicator(
+                    color = gold,
+                    modifier = Modifier.align(Alignment.CenterHorizontally)
+                )
             }
             errorMessage != null -> {
-                Text(text = errorMessage!!, color = Color.Red, fontSize = 16.sp)
+                Text(text = errorMessage!!, color = Color(0xFFFF8A80), fontSize = 16.sp)
             }
             allTemperatures.isEmpty() -> {
-                Text(text = "Brak danych pomiarowych.", fontSize = 16.sp)
+                Text(text = "Brak danych pomiarowych.", fontSize = 16.sp, color = cream)
             }
             filteredTemperatures.isEmpty() -> {
-                Text(text = "Brak danych dla wybranego zakresu.", fontSize = 16.sp)
+                Text(text = "Brak danych dla wybranego zakresu.", fontSize = 16.sp, color = cream)
             }
             else -> {
                 Row(
@@ -484,12 +502,12 @@ fun TemperatureScreen(onBackToMenu: () -> Unit) {
                     horizontalArrangement = Arrangement.SpaceAround
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("W domu", fontSize = 14.sp, color = Color.Gray)
-                        Text("${latest?.tempIn}°C", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color(0xFF4CAF50))
+                        Text("W domu", fontSize = 14.sp, color = mutedText)
+                        Text("${latest?.tempIn}°C", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color(0xFF66BB6A))
                     }
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Na zewnątrz", fontSize = 14.sp, color = Color.Gray)
-                        Text("${latest?.tempOut}°C", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color(0xFF2196F3))
+                        Text("Na zewnątrz", fontSize = 14.sp, color = mutedText)
+                        Text("${latest?.tempOut}°C", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color(0xFF42A5F5))
                     }
                 }
 
@@ -499,7 +517,7 @@ fun TemperatureScreen(onBackToMenu: () -> Unit) {
                     title = "W domu",
                     entries = filteredTemperatures,
                     selector = { it.tempIn },
-                    lineColor = Color(0xFF4CAF50)
+                    lineColor = Color(0xFF66BB6A)
                 )
 
                 Spacer(modifier = Modifier.height(24.dp))
@@ -508,7 +526,7 @@ fun TemperatureScreen(onBackToMenu: () -> Unit) {
                     title = "Na zewnątrz",
                     entries = filteredTemperatures,
                     selector = { it.tempOut },
-                    lineColor = Color(0xFF2196F3)
+                    lineColor = Color(0xFF42A5F5)
                 )
             }
         }
@@ -565,6 +583,7 @@ fun GasScreen(onBackToMenu: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .background(VelvetBackground)
             .statusBarsPadding()
             .navigationBarsPadding()
             .padding(16.dp),
@@ -582,7 +601,11 @@ fun GasScreen(onBackToMenu: () -> Unit) {
         Spacer(modifier = Modifier.height(24.dp))
 
         if (lastUpdateByHtml.isNotEmpty()) {
-            Text(text = "Ostatnia aktualizacja: $lastUpdateByHtml", fontSize = 14.sp, color = Color.Gray)
+            Text(
+                text = "Ostatnia aktualizacja: $lastUpdateByHtml",
+                fontSize = 14.sp,
+                color = cream.copy(alpha = 0.7f)
+            )
             Spacer(modifier = Modifier.height(4.dp))
         }
 
@@ -633,10 +656,11 @@ fun TemperatureChart(
     lineColor: Color,
     smoothingWindow: Int = 7
 ) {
+    val cream = Color(0xFFF7E9D7)
     val textMeasurer = rememberTextMeasurer()
-    val labelStyle = TextStyle(fontSize = 11.sp, color = Color.Gray)
+    val labelStyle = TextStyle(fontSize = 11.sp, color = cream.copy(alpha = 0.7f))
     val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
-    val gridColor = Color.Gray.copy(alpha = 0.25f)
+    val gridColor = cream.copy(alpha = 0.15f)
 
     val values = remember(entries, smoothingWindow) {
         smoothValues(entries.map(selector), smoothingWindow)
@@ -654,6 +678,7 @@ fun TemperatureChart(
             text = title,
             fontSize = 16.sp,
             fontWeight = FontWeight.Bold,
+            color = cream,
             modifier = Modifier.padding(bottom = 8.dp)
         )
         Canvas(
@@ -762,6 +787,54 @@ fun TemperatureChart(
                     cap = StrokeCap.Round,
                     join = StrokeJoin.Round
                 )
+            )
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // Min/max z wybranego zakresu czasu (6/12/24h)
+        MinMaxRow(
+            entries = entries,
+            selector = selector,
+            lineColor = lineColor
+        )
+    }
+}
+
+// Wiersz z minimalną i maksymalną temperaturą z aktualnie wybranego zakresu
+@Composable
+fun MinMaxRow(
+    entries: List<TemperatureEntry>,
+    selector: (TemperatureEntry) -> Float,
+    lineColor: Color
+) {
+    val labelColor = Color(0xFFF7E9D7).copy(alpha = 0.7f)
+    val rawValues = remember(entries) { entries.map(selector) }
+    if (rawValues.isEmpty()) return
+
+    val minValue = rawValues.min()
+    val maxValue = rawValues.max()
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceEvenly
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("Minimum", fontSize = 12.sp, color = labelColor)
+            Text(
+                text = String.format("%.1f°C", minValue),
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = lineColor
+            )
+        }
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text("Maksimum", fontSize = 12.sp, color = labelColor)
+            Text(
+                text = String.format("%.1f°C", maxValue),
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = lineColor
             )
         }
     }
