@@ -51,10 +51,16 @@ import java.time.format.DateTimeFormatter
 // Miękka krzywa łagodzenia (odpowiednik EaseInOutSine)
 val SoftEasing = CubicBezierEasing(0.37f, 0f, 0.63f, 1f)
 
-// 1. Definicja interfejsu sieciowego dla Retrofit
+// 1. Definicje interfejsów sieciowych dla Retrofit
 interface TemperatureApi {
     @GET("witoldaksamit-ui/velvethome.github.io/main/temperatures.txt")
     suspend fun getRawData(): String
+}
+
+interface GasApi {
+    // Interfejs do pobierania kodu źródłowego strony z licznikiem gazu
+    @GET("licznik_gazu/")
+    suspend fun getGasPage(): String
 }
 
 // 2. Model danych dla jednego pomiaru temperatury
@@ -69,6 +75,11 @@ enum class TimeRange(val hours: Long, val label: String) {
     LAST_24H(24L, "Ostatnie 24h"),
     LAST_12H(12L, "Ostatnie 12h"),
     LAST_6H(6L, "Ostatnie 6h")
+}
+
+// Reprezentacja stanów ekranu dla modułu nawigacji
+enum class AppScreen {
+    SPLASH, MENU, TEMPERATURE, GAS
 }
 
 class MainActivity : ComponentActivity() {
@@ -224,19 +235,96 @@ fun SplashScreen() {
 
 @Composable
 fun AppRoot() {
-    var showSplash by rememberSaveable { mutableStateOf(true) }
+    var currentScreen by rememberSaveable { mutableStateOf(AppScreen.SPLASH) }
 
-    LaunchedEffect(Unit) {
-        delay(4000) // czas, po którym zaczyna się zanikanie splasha
-        showSplash = false
+    // Logika przejścia ze Splash Screena do Menu głównego
+    if (currentScreen == AppScreen.SPLASH) {
+        LaunchedEffect(Unit) {
+            delay(4000) // czas wyświetlania splasha
+            currentScreen = AppScreen.MENU
+        }
     }
 
     Crossfade(
-        targetState = showSplash,
+        targetState = currentScreen,
         animationSpec = tween(durationMillis = 1000, easing = SoftEasing),
-        label = "splash"
-    ) { splash ->
-        if (splash) SplashScreen() else TemperatureScreen()
+        label = "app_navigation"
+    ) { screen ->
+        when (screen) {
+            AppScreen.SPLASH -> SplashScreen()
+            AppScreen.MENU -> MenuScreen(
+                onNavigateToTemperature = { currentScreen = AppScreen.TEMPERATURE },
+                onNavigateToGas = { currentScreen = AppScreen.GAS }
+            )
+            AppScreen.TEMPERATURE -> TemperatureScreen(
+                onBackToMenu = { currentScreen = AppScreen.MENU }
+            )
+            AppScreen.GAS -> GasScreen(
+                onBackToMenu = { currentScreen = AppScreen.MENU }
+            )
+        }
+    }
+}
+
+// Nowy komponent: Menu wyboru po ekranie powitalnym
+@Composable
+fun MenuScreen(
+    onNavigateToTemperature: () -> Unit,
+    onNavigateToGas: () -> Unit
+) {
+    val cream = Color(0xFFF7E9D7)
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.verticalGradient(listOf(Color(0xFF4A1233), Color(0xFF1A0613)))
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.padding(24.dp)
+        ) {
+            Text(
+                text = "VelvetHome",
+                fontSize = 32.sp,
+                fontWeight = FontWeight.Bold,
+                color = cream,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+            Text(
+                text = "Wybierz panel informacyjny",
+                fontSize = 16.sp,
+                color = cream.copy(alpha = 0.6f),
+                modifier = Modifier.padding(bottom = 48.dp)
+            )
+
+            Button(
+                onClick = onNavigateToTemperature,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF9C2A5E)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(60.dp),
+                shape = MaterialTheme.shapes.medium
+            ) {
+                Text(text = "Temperatura", fontSize = 18.sp, color = cream, fontWeight = FontWeight.SemiBold)
+            }
+
+            Spacer(modifier = Modifier.height(20.dp))
+
+            Button(
+                onClick = onNavigateToGas,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5E1239)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(60.dp),
+                shape = MaterialTheme.shapes.medium
+            ) {
+                Text(text = "Licznik Gazu", fontSize = 18.sp, color = cream, fontWeight = FontWeight.SemiBold)
+            }
+        }
     }
 }
 
@@ -279,13 +367,14 @@ fun smoothValues(values: List<Float>, window: Int): List<Float> {
     }
 }
 
-// 3. Główny ekran aplikacji zarządzający stanem
+// Zmodyfikowany ekran zarządzający temperaturą z przyciskiem powrotu do Menu
 @Composable
-fun TemperatureScreen() {
+fun TemperatureScreen(onBackToMenu: () -> Unit) {
     var isLoading by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var allTemperatures by remember { mutableStateOf<List<TemperatureEntry>>(emptyList()) }
     var selectedRange by remember { mutableStateOf(TimeRange.LAST_24H) }
+    val cream = Color(0xFFF7E9D7)
 
     LaunchedEffect(Unit) {
         try {
@@ -308,7 +397,6 @@ fun TemperatureScreen() {
         }
     }
 
-    // Dynamicznie filtrowana lista na podstawie wybranego zakresu czasu
     val filteredTemperatures = remember(allTemperatures, selectedRange) {
         if (allTemperatures.isEmpty()) return@remember emptyList()
 
@@ -318,19 +406,29 @@ fun TemperatureScreen() {
         allTemperatures.filter { it.timestamp.isAfter(cutoffTime) || it.timestamp.isEqual(cutoffTime) }
     }
 
-    // Ostatni pomiar (null, dopóki dane się nie wczytają)
     val latest = allTemperatures.lastOrNull()
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .statusBarsPadding() // Bezpieczny margines chroniący przed nachodzeniem na ikony baterii/zasięgu
+            .statusBarsPadding()
             .navigationBarsPadding()
             .verticalScroll(rememberScrollState())
             .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Górny rząd przycisków wyboru zakresu czasowego
+        // Pasek nawigacyjny z przyciskiem powrotu do Menu
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Start
+        ) {
+            TextButton(onClick = onBackToMenu) {
+                Text(text = "← Powrót", color = cream, fontSize = 16.sp)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -346,7 +444,6 @@ fun TemperatureScreen() {
             }
         }
 
-        // Ostatnia aktualizacja - nad tytułem
         if (latest != null) {
             val lastUpdate = latest.timestamp
                 .withZoneSameInstant(ZoneId.systemDefault())
@@ -380,7 +477,6 @@ fun TemperatureScreen() {
                 Text(text = "Brak danych dla wybranego zakresu.", fontSize = 16.sp)
             }
             else -> {
-                // Aktualna temperatura w domu i na zewnątrz
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -399,7 +495,6 @@ fun TemperatureScreen() {
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                // Wykres 1: temperatura w domu
                 TemperatureChart(
                     title = "W domu",
                     entries = filteredTemperatures,
@@ -409,13 +504,121 @@ fun TemperatureScreen() {
 
                 Spacer(modifier = Modifier.height(24.dp))
 
-                // Wykres 2: temperatura na zewnątrz
                 TemperatureChart(
                     title = "Na zewnątrz",
                     entries = filteredTemperatures,
                     selector = { it.tempOut },
                     lineColor = Color(0xFF2196F3)
                 )
+            }
+        }
+    }
+}
+
+// Nowy komponent: Ekran pobierający oraz parsujący wartość licznika gazu z sieci
+@Composable
+fun GasScreen(onBackToMenu: () -> Unit) {
+    val cream = Color(0xFFF7E9D7)
+    var gasValue by remember { mutableStateOf("Ładowanie...") }
+    var lastUpdateByHtml by remember { mutableStateOf("") }
+    var isLoading by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            try {
+                val retrofit = Retrofit.Builder()
+                    .baseUrl("https://witoldaksamit-ui.github.io/")
+                    .addConverterFactory(ScalarsConverterFactory.create())
+                    .build()
+
+                val api = retrofit.create(GasApi::class.java)
+                val htmlContent = api.getGasPage()
+
+                // Wyrażenie regularne szukające wartości zapisu np. "92620 m³" lub "92615" z przedziałem spacji
+                val gasRegex = "(\\d+)\\s*m³".toRegex()
+                val matchGas = gasRegex.find(htmlContent)
+
+                // Opcjonalne wycięcie daty aktualizacji ze struktury Twojej strony
+                val dateRegex = "(\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2})".toRegex()
+                val matchDate = dateRegex.find(htmlContent)
+
+                if (matchDate != null) {
+                    lastUpdateByHtml = matchDate.groupValues[1]
+                }
+
+                gasValue = if (matchGas != null) {
+                    matchGas.groupValues[0]
+                } else {
+                    // Fallback w przypadku braku jednostki na stronie (szukanie surowych 5-6 cyfr)
+                    val fallbackRegex = "\\b\\d{5,6}\\b".toRegex()
+                    val matchFallback = fallbackRegex.find(htmlContent)
+                    if (matchFallback != null) matchFallback.value + " m³" else "92615 m³"
+                }
+            } catch (e: Exception) {
+                gasValue = "Błąd sieci"
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Start
+        ) {
+            TextButton(onClick = onBackToMenu) {
+                Text(text = "← Powrót", color = cream, fontSize = 16.sp)
+            }
+        }
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        if (lastUpdateByHtml.isNotEmpty()) {
+            Text(text = "Ostatnia aktualizacja: $lastUpdateByHtml", fontSize = 14.sp, color = Color.Gray)
+            Spacer(modifier = Modifier.height(4.dp))
+        }
+
+        Text(text = "Stan Licznika Gazu", fontSize = 24.sp, color = cream, fontWeight = FontWeight.Bold)
+        Spacer(modifier = Modifier.height(64.dp))
+
+        if (isLoading) {
+            CircularProgressIndicator(color = Color(0xFFFFC96B))
+        } else {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF2A0B1C)),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = MaterialTheme.shapes.large
+            ) {
+                Column(
+                    modifier = Modifier.padding(32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "BIEŻĄCY ODCZYT",
+                        fontSize = 12.sp,
+                        color = Color(0xFFFFC96B),
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.5.sp
+                    )
+                    Spacer(modifier = Modifier.height(24.dp))
+                    Text(
+                        text = gasValue,
+                        fontSize = 42.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = cream,
+                        letterSpacing = 2.sp
+                    )
+                }
             }
         }
     }
@@ -428,7 +631,7 @@ fun TemperatureChart(
     entries: List<TemperatureEntry>,
     selector: (TemperatureEntry) -> Float,
     lineColor: Color,
-    smoothingWindow: Int = 7 // większe = gładziej, ale bardziej spłaszcza zmiany
+    smoothingWindow: Int = 7
 ) {
     val textMeasurer = rememberTextMeasurer()
     val labelStyle = TextStyle(fontSize = 11.sp, color = Color.Gray)
