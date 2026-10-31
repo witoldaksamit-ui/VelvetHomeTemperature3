@@ -697,7 +697,8 @@ fun GasScreen(onBackToMenu: () -> Unit) {
                     valueFormat = "%.3f m³",
                     leftMargin = 52.dp,
                     minPad = 0.005f,
-                    smoothingWindow = 1
+                    smoothingWindow = 1,
+                    showMinMax = false
                 )
 
                 Spacer(modifier = Modifier.height(24.dp))
@@ -712,7 +713,8 @@ fun GasScreen(onBackToMenu: () -> Unit) {
                     valueFormat = "%.3f m³",
                     leftMargin = 52.dp,
                     minPad = 0.001f,
-                    smoothingWindow = 1
+                    smoothingWindow = 1,
+                    showMinMax = false
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -754,7 +756,8 @@ fun LineChart(
     valueFormat: String,        // format wartości min/max
     leftMargin: Dp = 44.dp,
     minPad: Float = 0.5f,
-    smoothingWindow: Int = 7
+    smoothingWindow: Int = 7,
+    showMinMax: Boolean = true
 ) {
     val darkText = Color(0xFF3A3A3A)
     val textMeasurer = rememberTextMeasurer()
@@ -894,14 +897,16 @@ fun LineChart(
             )
         }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        if (showMinMax) {
+            Spacer(modifier = Modifier.height(8.dp))
 
-        // Min/max z wybranego zakresu czasu
-        MinMaxRow(
-            values = rawValues,
-            valueFormat = valueFormat,
-            lineColor = lineColor
-        )
+            // Min/max z wybranego zakresu czasu
+            MinMaxRow(
+                values = rawValues,
+                valueFormat = valueFormat,
+                lineColor = lineColor
+            )
+        }
     }
 }
 
