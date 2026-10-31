@@ -14,6 +14,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -35,6 +36,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
@@ -44,6 +46,8 @@ import kotlinx.coroutines.withContext
 import retrofit2.Retrofit
 import retrofit2.converter.scalars.ScalarsConverterFactory
 import retrofit2.http.GET
+import java.time.Instant
+import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
@@ -61,9 +65,9 @@ interface TemperatureApi {
 }
 
 interface GasApi {
-    // Interfejs do pobierania kodu źródłowego strony z licznikiem gazu
-    @GET("licznik_gazu/")
-    suspend fun getGasPage(): String
+    // Surowy plik z odczytami licznika gazu (format: "2026-10-30 16:07:24 | 106.973")
+    @GET("witoldaksamit-ui/licznik_gazu/main/odczyty24h.txt")
+    suspend fun getReadings(): String
 }
 
 // 2. Model danych dla jednego pomiaru temperatury
@@ -71,6 +75,12 @@ data class TemperatureEntry(
     val timestamp: ZonedDateTime,
     val tempIn: Float,
     val tempOut: Float
+)
+
+// Model danych dla jednego odczytu licznika gazu
+data class GasReading(
+    val timestamp: LocalDateTime,
+    val value: Double
 )
 
 // Definicja dostępnych zakresów czasowych dla osi X
@@ -246,28 +256,35 @@ fun AppRoot() {
         }
     }
 
-    Crossfade(
-        targetState = currentScreen,
-        animationSpec = tween(durationMillis = 1000, easing = SoftEasing),
-        label = "app_navigation"
-    ) { screen ->
-        when (screen) {
-            AppScreen.SPLASH -> SplashScreen()
-            AppScreen.MENU -> MenuScreen(
-                onNavigateToTemperature = { currentScreen = AppScreen.TEMPERATURE },
-                onNavigateToGas = { currentScreen = AppScreen.GAS }
-            )
-            AppScreen.TEMPERATURE -> TemperatureScreen(
-                onBackToMenu = { currentScreen = AppScreen.MENU }
-            )
-            AppScreen.GAS -> GasScreen(
-                onBackToMenu = { currentScreen = AppScreen.MENU }
-            )
+    when (currentScreen) {
+        // Płynne przejście wyłącznie między splashem a pierwszą kartą (menu)
+        AppScreen.SPLASH, AppScreen.MENU -> {
+            Crossfade(
+                targetState = currentScreen,
+                animationSpec = tween(durationMillis = 1000, easing = SoftEasing),
+                label = "splash_to_menu"
+            ) { screen ->
+                when (screen) {
+                    AppScreen.SPLASH -> SplashScreen()
+                    AppScreen.MENU -> MenuScreen(
+                        onNavigateToTemperature = { currentScreen = AppScreen.TEMPERATURE },
+                        onNavigateToGas = { currentScreen = AppScreen.GAS }
+                    )
+                    else -> Unit
+                }
+            }
         }
+        // Pozostałe przejścia są twarde (bez animacji)
+        AppScreen.TEMPERATURE -> TemperatureScreen(
+            onBackToMenu = { currentScreen = AppScreen.MENU }
+        )
+        AppScreen.GAS -> GasScreen(
+            onBackToMenu = { currentScreen = AppScreen.MENU }
+        )
     }
 }
 
-// Nowy komponent: Menu wyboru po ekranie powitalnym
+// Menu wyboru po ekranie powitalnym
 @Composable
 fun MenuScreen(
     onNavigateToTemperature: () -> Unit,
@@ -291,12 +308,6 @@ fun MenuScreen(
                 fontSize = 32.sp,
                 fontWeight = FontWeight.Bold,
                 color = cream,
-                modifier = Modifier.padding(bottom = 8.dp)
-            )
-            Text(
-                text = "Wybierz panel informacyjny",
-                fontSize = 16.sp,
-                color = cream.copy(alpha = 0.6f),
                 modifier = Modifier.padding(bottom = 48.dp)
             )
 
@@ -353,6 +364,26 @@ fun parseCsvData(rawText: String): List<TemperatureEntry> {
     return entries.sortedBy { it.timestamp }
 }
 
+// Parsowanie odczytów gazu. Format linii: "2026-10-30 16:07:24 | 106.973"
+fun parseGasReadings(rawText: String): List<GasReading> {
+    val formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+    return rawText.lines().mapNotNull { line ->
+        val trimmed = line.trim()
+        if (trimmed.isEmpty()) return@mapNotNull null
+        try {
+            val parts = trimmed.split("|")
+            if (parts.size < 2) return@mapNotNull null
+            GasReading(
+                timestamp = LocalDateTime.parse(parts[0].trim(), formatter),
+                value = parts[1].trim().toDouble()
+            )
+        } catch (e: Exception) {
+            android.util.Log.e("GAS_PARSE", "Błąd w linii: $trimmed", e)
+            null
+        }
+    }.sortedBy { it.timestamp }
+}
+
 // Średnia krocząca - usuwa schodki wynikające z rozdzielczości czujnika
 fun smoothValues(values: List<Float>, window: Int): List<Float> {
     if (window <= 1 || values.size < 3) return values
@@ -366,7 +397,7 @@ fun smoothValues(values: List<Float>, window: Int): List<Float> {
     }
 }
 
-// Zmodyfikowany ekran zarządzający temperaturą z przyciskiem powrotu do Menu
+// Ekran zarządzający temperaturą z przyciskiem powrotu do Menu
 @Composable
 fun TemperatureScreen(onBackToMenu: () -> Unit) {
     var isLoading by remember { mutableStateOf(true) }
@@ -533,51 +564,52 @@ fun TemperatureScreen(onBackToMenu: () -> Unit) {
     }
 }
 
-// Nowy komponent: Ekran pobierający oraz parsujący wartość licznika gazu z sieci
+// Ekran licznika gazu: aktualny stan + wykresy z ostatnich 24h
 @Composable
 fun GasScreen(onBackToMenu: () -> Unit) {
     val cream = Color(0xFFF7E9D7)
-    var gasValue by remember { mutableStateOf("Ładowanie...") }
-    var lastUpdateByHtml by remember { mutableStateOf("") }
+    var readings by remember { mutableStateOf<List<GasReading>>(emptyList()) }
+    var errorMessage by remember { mutableStateOf<String?>(null) }
     var isLoading by remember { mutableStateOf(true) }
 
     LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) {
-            try {
-                val retrofit = Retrofit.Builder()
-                    .baseUrl("https://witoldaksamit-ui.github.io/")
-                    .addConverterFactory(ScalarsConverterFactory.create())
-                    .build()
+        try {
+            val retrofit = Retrofit.Builder()
+                .baseUrl("https://raw.githubusercontent.com/")
+                .addConverterFactory(ScalarsConverterFactory.create())
+                .build()
 
-                val api = retrofit.create(GasApi::class.java)
-                val htmlContent = api.getGasPage()
+            val api = retrofit.create(GasApi::class.java)
+            val rawText = withContext(Dispatchers.IO) { api.getReadings() }
 
-                // Wyrażenie regularne szukające wartości zapisu np. "92620 m³" lub "92615" z przedziałem spacji
-                val gasRegex = "(\\d+)\\s*m³".toRegex()
-                val matchGas = gasRegex.find(htmlContent)
-
-                // Opcjonalne wycięcie daty aktualizacji ze struktury Twojej strony
-                val dateRegex = "(\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}:\\d{2})".toRegex()
-                val matchDate = dateRegex.find(htmlContent)
-
-                if (matchDate != null) {
-                    lastUpdateByHtml = matchDate.groupValues[1]
-                }
-
-                gasValue = if (matchGas != null) {
-                    matchGas.groupValues[0]
-                } else {
-                    // Fallback w przypadku braku jednostki na stronie (szukanie surowych 5-6 cyfr)
-                    val fallbackRegex = "\\b\\d{5,6}\\b".toRegex()
-                    val matchFallback = fallbackRegex.find(htmlContent)
-                    if (matchFallback != null) matchFallback.value + " m³" else "92615 m³"
-                }
-            } catch (e: Exception) {
-                gasValue = "Błąd sieci"
-            } finally {
-                isLoading = false
-            }
+            readings = parseGasReadings(rawText)
+            if (readings.isEmpty()) errorMessage = "Brak odczytów w pliku"
+        } catch (e: Exception) {
+            errorMessage = "Błąd pobierania danych: ${e.localizedMessage}"
+        } finally {
+            isLoading = false
         }
+    }
+
+    val latestReading = readings.lastOrNull()
+    val zone = ZoneId.systemDefault()
+
+    // Dane do wykresów z ostatnich 24h (względem ostatniego odczytu)
+    val cutoff = latestReading?.timestamp?.minusHours(24)
+    val levelReadings = remember(readings) {
+        if (cutoff == null) emptyList() else readings.filter { !it.timestamp.isBefore(cutoff) }
+    }
+    // Chwilowe zużycie = różnica między kolejnymi odczytami (Δ m³)
+    val deltaTimes = remember(readings) {
+        if (cutoff == null) emptyList() else
+            readings.drop(1).filter { !it.timestamp.isBefore(cutoff) }
+                .map { it.timestamp.atZone(zone).toEpochSecond() }
+    }
+    val deltaValues = remember(readings) {
+        if (cutoff == null) emptyList() else
+            readings.zipWithNext()
+                .filter { (_, cur) -> !cur.timestamp.isBefore(cutoff) }
+                .map { (prev, cur) -> (cur.value - prev.value).toFloat() }
     }
 
     Column(
@@ -586,6 +618,7 @@ fun GasScreen(onBackToMenu: () -> Unit) {
             .background(VelvetBackground)
             .statusBarsPadding()
             .navigationBarsPadding()
+            .verticalScroll(rememberScrollState())
             .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -600,9 +633,10 @@ fun GasScreen(onBackToMenu: () -> Unit) {
 
         Spacer(modifier = Modifier.height(24.dp))
 
-        if (lastUpdateByHtml.isNotEmpty()) {
+        latestReading?.let {
             Text(
-                text = "Ostatnia aktualizacja: $lastUpdateByHtml",
+                text = "Ostatnia aktualizacja: " +
+                        it.timestamp.format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm")),
                 fontSize = 14.sp,
                 color = cream.copy(alpha = 0.7f)
             )
@@ -610,44 +644,84 @@ fun GasScreen(onBackToMenu: () -> Unit) {
         }
 
         Text(text = "Stan Licznika Gazu", fontSize = 24.sp, color = cream, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(64.dp))
+        Spacer(modifier = Modifier.height(32.dp))
 
-        if (isLoading) {
-            CircularProgressIndicator(color = Color(0xFFFFC96B))
-        } else {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF2A0B1C)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                shape = MaterialTheme.shapes.large
-            ) {
-                Column(
-                    modifier = Modifier.padding(32.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+        when {
+            isLoading -> CircularProgressIndicator(color = Color(0xFFFFC96B))
+            errorMessage != null -> Text(
+                text = errorMessage!!,
+                color = Color(0xFFFF8A80),
+                fontSize = 16.sp
+            )
+            else -> {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF2A0B1C)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    shape = MaterialTheme.shapes.large
                 ) {
-                    Text(
-                        text = "BIEŻĄCY ODCZYT",
-                        fontSize = 12.sp,
-                        color = Color(0xFFFFC96B),
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.5.sp
-                    )
-                    Spacer(modifier = Modifier.height(24.dp))
-                    Text(
-                        text = gasValue,
-                        fontSize = 42.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = cream,
-                        letterSpacing = 2.sp
-                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(32.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = "BIEŻĄCY ODCZYT",
+                            fontSize = 12.sp,
+                            color = Color(0xFFFFC96B),
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.5.sp
+                        )
+                        Spacer(modifier = Modifier.height(24.dp))
+                        Text(
+                            text = String.format("%.3f m³", latestReading!!.value),
+                            fontSize = 42.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = cream,
+                            letterSpacing = 1.sp
+                        )
+                    }
                 }
+
+                Spacer(modifier = Modifier.height(32.dp))
+
+                // Wykres 1: skumulowany stan licznika z ostatnich 24h
+                LineChart(
+                    title = "Zmiana stanu licznika – ostatnie 24h (m³)",
+                    times = levelReadings.map { it.timestamp.atZone(zone).toEpochSecond() },
+                    rawValues = levelReadings.map { it.value.toFloat() },
+                    lineColor = Color(0xFFEF6C00),
+                    axisFormat = "%.3f",
+                    valueFormat = "%.3f m³",
+                    leftMargin = 52.dp,
+                    minPad = 0.005f,
+                    smoothingWindow = 1
+                )
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                // Wykres 2: chwilowe zużycie (Δ m³ między odczytami)
+                LineChart(
+                    title = "Chwilowe zużycie gazu – ostatnie 24h (Δ m³)",
+                    times = deltaTimes,
+                    rawValues = deltaValues,
+                    lineColor = Color(0xFF8E24AA),
+                    axisFormat = "%.3f",
+                    valueFormat = "%.3f m³",
+                    leftMargin = 52.dp,
+                    minPad = 0.001f,
+                    smoothingWindow = 1
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
             }
         }
     }
 }
 
-// 4. Komponent wykresu: wygładzone dane, krzywa Béziera, oś X z czasu, siatka
+// Wykres temperatury (opakowanie ogólnego wykresu liniowego)
 @Composable
 fun TemperatureChart(
     title: String,
@@ -656,29 +730,60 @@ fun TemperatureChart(
     lineColor: Color,
     smoothingWindow: Int = 7
 ) {
-    val cream = Color(0xFFF7E9D7)
-    val textMeasurer = rememberTextMeasurer()
-    val labelStyle = TextStyle(fontSize = 11.sp, color = cream.copy(alpha = 0.7f))
-    val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
-    val gridColor = cream.copy(alpha = 0.15f)
+    LineChart(
+        title = title,
+        times = entries.map { it.timestamp.toEpochSecond() },
+        rawValues = entries.map(selector),
+        lineColor = lineColor,
+        axisFormat = "%.1f°C",
+        valueFormat = "%.1f°C",
+        leftMargin = 44.dp,
+        minPad = 0.5f,
+        smoothingWindow = smoothingWindow
+    )
+}
 
-    val values = remember(entries, smoothingWindow) {
-        smoothValues(entries.map(selector), smoothingWindow)
+// Ogólny wykres liniowy na białym tle: wygładzone dane, krzywa Béziera, oś X z czasu, siatka, min/max
+@Composable
+fun LineChart(
+    title: String,
+    times: List<Long>,          // czas w sekundach epoki
+    rawValues: List<Float>,
+    lineColor: Color,
+    axisFormat: String,         // format etykiet osi Y
+    valueFormat: String,        // format wartości min/max
+    leftMargin: Dp = 44.dp,
+    minPad: Float = 0.5f,
+    smoothingWindow: Int = 7
+) {
+    val darkText = Color(0xFF3A3A3A)
+    val textMeasurer = rememberTextMeasurer()
+    val labelStyle = TextStyle(fontSize = 11.sp, color = darkText.copy(alpha = 0.8f))
+    val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+    val gridColor = Color.Black.copy(alpha = 0.12f)
+
+    val values = remember(rawValues, smoothingWindow) {
+        smoothValues(rawValues, smoothingWindow)
     }
-    if (values.isEmpty()) return
+    if (values.isEmpty() || times.size != values.size) return
 
     val minV = values.min()
     val maxV = values.max()
-    val pad = ((maxV - minV) * 0.1f).coerceAtLeast(0.5f)
+    val pad = ((maxV - minV) * 0.1f).coerceAtLeast(minPad)
     val yMin = minV - pad
     val yMax = maxV + pad
 
-    Column(modifier = Modifier.fillMaxWidth()) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White, RoundedCornerShape(16.dp))
+            .padding(12.dp)
+    ) {
         Text(
             text = title,
             fontSize = 16.sp,
             fontWeight = FontWeight.Bold,
-            color = cream,
+            color = darkText,
             modifier = Modifier.padding(bottom = 8.dp)
         )
         Canvas(
@@ -686,20 +791,20 @@ fun TemperatureChart(
                 .fillMaxWidth()
                 .height(200.dp)
         ) {
-            val left = 44.dp.toPx()
+            val left = leftMargin.toPx()
             val right = 16.dp.toPx()
             val top = 8.dp.toPx()
             val bottom = 24.dp.toPx()
             val chartWidth = size.width - left - right
             val chartHeight = size.height - top - bottom
-            if (entries.size < 2) return@Canvas
+            if (times.size < 2) return@Canvas
 
-            val t0 = entries.first().timestamp.toEpochSecond()
-            val t1 = entries.last().timestamp.toEpochSecond()
+            val t0 = times.first()
+            val t1 = times.last()
             val span = (t1 - t0).coerceAtLeast(1L).toFloat()
             val gridStroke = 1.dp.toPx()
 
-            // Siatka + opisy osi Y (temperatura)
+            // Siatka + opisy osi Y
             val yLabelsCount = 4
             for (i in 0 until yLabelsCount) {
                 val fraction = i.toFloat() / (yLabelsCount - 1)
@@ -714,7 +819,7 @@ fun TemperatureChart(
                 )
                 drawText(
                     textMeasurer = textMeasurer,
-                    text = String.format("%.1f°C", value),
+                    text = String.format(axisFormat, value),
                     style = labelStyle,
                     topLeft = Offset(4.dp.toPx(), y - 8.dp.toPx())
                 )
@@ -725,9 +830,8 @@ fun TemperatureChart(
             for (i in 0 until xLabelsCount) {
                 val fraction = i.toFloat() / (xLabelsCount - 1)
                 val x = left + fraction * chartWidth
-                val timeStr = entries.first().timestamp
-                    .plusSeconds((span * fraction).toLong())
-                    .withZoneSameInstant(ZoneId.systemDefault())
+                val timeStr = Instant.ofEpochSecond(t0 + (span * fraction).toLong())
+                    .atZone(ZoneId.systemDefault())
                     .format(timeFormatter)
 
                 drawLine(
@@ -745,8 +849,8 @@ fun TemperatureChart(
             }
 
             // Punkty wykresu
-            val points = entries.indices.map { i ->
-                val xFraction = (entries[i].timestamp.toEpochSecond() - t0).toFloat() / span
+            val points = times.indices.map { i ->
+                val xFraction = (times[i] - t0).toFloat() / span
                 val yFraction = (values[i] - yMin) / (yMax - yMin)
                 Offset(
                     left + xFraction * chartWidth,
@@ -792,28 +896,27 @@ fun TemperatureChart(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Min/max z wybranego zakresu czasu (6/12/24h)
+        // Min/max z wybranego zakresu czasu
         MinMaxRow(
-            entries = entries,
-            selector = selector,
+            values = rawValues,
+            valueFormat = valueFormat,
             lineColor = lineColor
         )
     }
 }
 
-// Wiersz z minimalną i maksymalną temperaturą z aktualnie wybranego zakresu
+// Wiersz z minimalną i maksymalną wartością z aktualnie wybranego zakresu
 @Composable
 fun MinMaxRow(
-    entries: List<TemperatureEntry>,
-    selector: (TemperatureEntry) -> Float,
+    values: List<Float>,
+    valueFormat: String,
     lineColor: Color
 ) {
-    val labelColor = Color(0xFFF7E9D7).copy(alpha = 0.7f)
-    val rawValues = remember(entries) { entries.map(selector) }
-    if (rawValues.isEmpty()) return
+    val labelColor = Color(0xFF3A3A3A).copy(alpha = 0.7f)
+    if (values.isEmpty()) return
 
-    val minValue = rawValues.min()
-    val maxValue = rawValues.max()
+    val minValue = values.min()
+    val maxValue = values.max()
 
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -822,7 +925,7 @@ fun MinMaxRow(
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("Minimum", fontSize = 12.sp, color = labelColor)
             Text(
-                text = String.format("%.1f°C", minValue),
+                text = String.format(valueFormat, minValue),
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold,
                 color = lineColor
@@ -831,7 +934,7 @@ fun MinMaxRow(
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text("Maksimum", fontSize = 12.sp, color = labelColor)
             Text(
-                text = String.format("%.1f°C", maxValue),
+                text = String.format(valueFormat, maxValue),
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Bold,
                 color = lineColor
