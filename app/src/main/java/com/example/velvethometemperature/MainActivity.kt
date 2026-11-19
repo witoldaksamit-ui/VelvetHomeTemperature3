@@ -48,7 +48,6 @@ import kotlinx.coroutines.withContext
 import retrofit2.Retrofit
 import retrofit2.converter.scalars.ScalarsConverterFactory
 import retrofit2.http.GET
-import retrofit2.http.Path
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
@@ -65,7 +64,7 @@ val VelvetBackground = Brush.verticalGradient(listOf(Color(0xFF4A1233), Color(0x
 interface TemperatureApi {
     // Plik pomieszczenia z repozytorium velvethome.github.io, np. "temperatures_salon.txt"
     @GET("witoldaksamit-ui/velvethome.github.io/main/{file}")
-    suspend fun getRoomFile(@Path("file") file: String): String
+    suspend fun getRoomFile(@retrofit2.http.Path("file") file: String): String
 }
 
 interface GasApi {
