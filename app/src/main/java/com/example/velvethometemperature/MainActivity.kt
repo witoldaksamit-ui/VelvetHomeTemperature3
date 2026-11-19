@@ -83,11 +83,11 @@ data class RoomEntry(
 // Pomieszczenie: nazwa na ekranie, plik z danymi i kolor
 data class Room(val name: String, val file: String, val color: Color)
 
-// Czujnik "sypialnia" wisi za oknem, dlatego na ekranie nazywa się "Na zewnątrz"
+// Czujnik "sypialnia" wisi za oknem, dlatego na ekranie nazywa się "Dwór"
 val ROOMS = listOf(
-    Room("Salon", "temperatures_salon.txt", Color(0xFF66BB6A)),
-    Room("Na zewnątrz", "temperatures_sypialnia.txt", Color(0xFF42A5F5)),
-    Room("Pralnia", "temperatures_pralnia.txt", Color(0xFF26A69A))
+    Room("Salon", "temperatures_salon.txt", Color(0xFFEF5350)),     // czerwony
+    Room("Dwór", "temperatures_sypialnia.txt", Color(0xFF66BB6A)),  // zielony
+    Room("Pralnia", "temperatures_pralnia.txt", Color(0xFF42A5F5))  // niebieski
 )
 
 // Model danych dla jednego odczytu licznika gazu
