@@ -40,12 +40,15 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import retrofit2.Retrofit
 import retrofit2.converter.scalars.ScalarsConverterFactory
 import retrofit2.http.GET
+import retrofit2.http.Path
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
@@ -60,8 +63,9 @@ val VelvetBackground = Brush.verticalGradient(listOf(Color(0xFF4A1233), Color(0x
 
 // 1. Definicje interfejsów sieciowych dla Retrofit
 interface TemperatureApi {
-    @GET("witoldaksamit-ui/velvethome.github.io/main/temperatures.txt")
-    suspend fun getRawData(): String
+    // Plik pomieszczenia z repozytorium velvethome.github.io, np. "temperatures_salon.txt"
+    @GET("witoldaksamit-ui/velvethome.github.io/main/{file}")
+    suspend fun getRoomFile(@Path("file") file: String): String
 }
 
 interface GasApi {
@@ -70,11 +74,21 @@ interface GasApi {
     suspend fun getReadings(): String
 }
 
-// 2. Model danych dla jednego pomiaru temperatury
-data class TemperatureEntry(
+// 2. Model danych dla jednego pomiaru w pomieszczeniu (temperatura i wilgotność)
+data class RoomEntry(
     val timestamp: ZonedDateTime,
-    val tempIn: Float,
-    val tempOut: Float
+    val temperature: Float,
+    val humidity: Float?        // null, gdy w pliku nie ma wilgotności
+)
+
+// Pomieszczenie: nazwa na ekranie, plik z danymi i kolor
+data class Room(val name: String, val file: String, val color: Color)
+
+// Czujnik "sypialnia" wisi za oknem, dlatego na ekranie nazywa się "Na zewnątrz"
+val ROOMS = listOf(
+    Room("Salon", "temperatures_salon.txt", Color(0xFF66BB6A)),
+    Room("Na zewnątrz", "temperatures_sypialnia.txt", Color(0xFF42A5F5)),
+    Room("Pralnia", "temperatures_pralnia.txt", Color(0xFF26A69A))
 )
 
 // Model danych dla jednego odczytu licznika gazu
@@ -338,30 +352,26 @@ fun MenuScreen(
     }
 }
 
-// Funkcja parsowania danych wejściowych dopasowana do formatu ISO-8601
-fun parseCsvData(rawText: String): List<TemperatureEntry> {
-    val entries = mutableListOf<TemperatureEntry>()
+// Parsowanie pliku pomieszczenia. Format linii: "2026-11-19T19:45:33+01:00,21.2,50"
+// (wilgotność może być pusta, np. "2026-11-19T19:45:33+01:00,21.2,")
+fun parseRoomData(rawText: String): List<RoomEntry> {
     val formatter = DateTimeFormatter.ISO_DATE_TIME
-    val lines = rawText.lines()
-
-    for (line in lines) {
+    return rawText.lines().mapNotNull { line ->
         val trimmed = line.trim()
-        if (trimmed.isEmpty()) continue
-
+        if (trimmed.isEmpty() || trimmed.startsWith("#")) return@mapNotNull null
         try {
             val tokens = trimmed.split(",")
-            if (tokens.size >= 3) {
-                val timestamp = ZonedDateTime.parse(tokens[0].trim(), formatter)
-                val tempIn = tokens[1].trim().toFloat()
-                val tempOut = tokens[2].trim().toFloat()
-
-                entries.add(TemperatureEntry(timestamp, tempIn, tempOut))
-            }
+            if (tokens.size < 2) return@mapNotNull null
+            RoomEntry(
+                timestamp = ZonedDateTime.parse(tokens[0].trim(), formatter),
+                temperature = tokens[1].trim().toFloat(),
+                humidity = tokens.getOrNull(2)?.trim()?.toFloatOrNull()
+            )
         } catch (e: Exception) {
-            android.util.Log.e("CSV_PARSE", "Błąd w linii: $trimmed", e)
+            android.util.Log.e("ROOM_PARSE", "Błąd w linii: $trimmed", e)
+            null
         }
-    }
-    return entries.sortedBy { it.timestamp }
+    }.sortedBy { it.timestamp }
 }
 
 // Parsowanie odczytów gazu. Format linii: "2026-10-30 16:07:24 | 106.973"
@@ -397,48 +407,54 @@ fun smoothValues(values: List<Float>, window: Int): List<Float> {
     }
 }
 
-// Ekran zarządzający temperaturą z przyciskiem powrotu do Menu
+// Ekran temperatury i wilgotności: salon, na zewnątrz i pralnia
 @Composable
 fun TemperatureScreen(onBackToMenu: () -> Unit) {
     var isLoading by remember { mutableStateOf(true) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
-    var allTemperatures by remember { mutableStateOf<List<TemperatureEntry>>(emptyList()) }
+    // nazwa pliku -> pomiary (tylko pliki pobrane bez błędu)
+    var roomData by remember { mutableStateOf<Map<String, List<RoomEntry>>>(emptyMap()) }
+    var failedRooms by remember { mutableStateOf<Set<String>>(emptySet()) }
     var selectedRange by remember { mutableStateOf(TimeRange.LAST_24H) }
     val cream = Color(0xFFF7E9D7)
     val gold = Color(0xFFFFC96B)
     val mutedText = cream.copy(alpha = 0.7f)
 
     LaunchedEffect(Unit) {
-        try {
-            val retrofit = Retrofit.Builder()
-                .baseUrl("https://raw.githubusercontent.com")
-                .addConverterFactory(ScalarsConverterFactory.create())
-                .build()
+        val retrofit = Retrofit.Builder()
+            .baseUrl("https://raw.githubusercontent.com/")
+            .addConverterFactory(ScalarsConverterFactory.create())
+            .build()
+        val api = retrofit.create(TemperatureApi::class.java)
 
-            val api = retrofit.create(TemperatureApi::class.java)
+        // Pliki pobierane równolegle; błąd jednego nie blokuje pozostałych
+        val results = withContext(Dispatchers.IO) {
+            ROOMS.map { room ->
+                async { room.file to runCatching { parseRoomData(api.getRoomFile(room.file)) } }
+            }.awaitAll()
+        }
 
-            val rawText = withContext(Dispatchers.IO) {
-                api.getRawData()
-            }
+        roomData = results
+            .mapNotNull { (file, result) -> result.getOrNull()?.let { file to it } }
+            .toMap()
+        failedRooms = results.filter { it.second.isFailure }.map { it.first }.toSet()
+        if (roomData.isEmpty()) {
+            val cause = results.firstNotNullOfOrNull { it.second.exceptionOrNull() }
+            errorMessage = "Błąd pobierania danych: ${cause?.localizedMessage}"
+        }
+        isLoading = false
+    }
 
-            allTemperatures = parseCsvData(rawText)
-            isLoading = false
-        } catch (e: Exception) {
-            errorMessage = "Błąd pobierania danych: ${e.localizedMessage}"
-            isLoading = false
+    // Najnowszy pomiar ze wszystkich pomieszczeń - od niego liczymy wybrany zakres
+    val latestTime = remember(roomData) {
+        roomData.values.flatten().maxOfOrNull { it.timestamp }
+    }
+    val filteredData = remember(roomData, selectedRange) {
+        val cutoff = latestTime?.minusHours(selectedRange.hours)
+        roomData.mapValues { (_, entries) ->
+            if (cutoff == null) entries else entries.filter { !it.timestamp.isBefore(cutoff) }
         }
     }
-
-    val filteredTemperatures = remember(allTemperatures, selectedRange) {
-        if (allTemperatures.isEmpty()) return@remember emptyList()
-
-        val latestTime = allTemperatures.maxByOrNull { it.timestamp }?.timestamp ?: ZonedDateTime.now()
-        val cutoffTime = latestTime.minusHours(selectedRange.hours)
-
-        allTemperatures.filter { it.timestamp.isAfter(cutoffTime) || it.timestamp.isEqual(cutoffTime) }
-    }
-
-    val latest = allTemperatures.lastOrNull()
 
     Column(
         modifier = Modifier
@@ -489,8 +505,8 @@ fun TemperatureScreen(onBackToMenu: () -> Unit) {
             }
         }
 
-        if (latest != null) {
-            val lastUpdate = latest.timestamp
+        if (latestTime != null) {
+            val lastUpdate = latestTime
                 .withZoneSameInstant(ZoneId.systemDefault())
                 .format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"))
             Text(
@@ -519,46 +535,76 @@ fun TemperatureScreen(onBackToMenu: () -> Unit) {
             errorMessage != null -> {
                 Text(text = errorMessage!!, color = Color(0xFFFF8A80), fontSize = 16.sp)
             }
-            allTemperatures.isEmpty() -> {
-                Text(text = "Brak danych pomiarowych.", fontSize = 16.sp, color = cream)
-            }
-            filteredTemperatures.isEmpty() -> {
-                Text(text = "Brak danych dla wybranego zakresu.", fontSize = 16.sp, color = cream)
-            }
             else -> {
+                // Bieżące odczyty: temperatura i wilgotność w każdym pomieszczeniu
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(bottom = 16.dp),
                     horizontalArrangement = Arrangement.SpaceAround
                 ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("W domu", fontSize = 14.sp, color = mutedText)
-                        Text("${latest?.tempIn}°C", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color(0xFF66BB6A))
-                    }
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Na zewnątrz", fontSize = 14.sp, color = mutedText)
-                        Text("${latest?.tempOut}°C", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = Color(0xFF42A5F5))
+                    ROOMS.forEach { room ->
+                        val last = roomData[room.file]?.lastOrNull()
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(room.name, fontSize = 14.sp, color = mutedText)
+                            Text(
+                                text = last?.let { String.format("%.1f°C", it.temperature) } ?: "–",
+                                fontSize = 24.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = room.color
+                            )
+                            Text(
+                                text = last?.humidity?.let { String.format("%.0f%%", it) } ?: "",
+                                fontSize = 14.sp,
+                                color = cream
+                            )
+                        }
                     }
                 }
 
                 Spacer(modifier = Modifier.height(8.dp))
 
-                TemperatureChart(
-                    title = "W domu",
-                    entries = filteredTemperatures,
-                    selector = { it.tempIn },
-                    lineColor = Color(0xFF66BB6A)
-                )
+                // Wykres temperatury dla każdego pomieszczenia
+                ROOMS.forEach { room ->
+                    val entries = filteredData[room.file].orEmpty()
+                    if (entries.size >= 2) {
+                        TemperatureChart(title = room.name, entries = entries, lineColor = room.color)
+                    } else {
+                        ChartPlaceholder(
+                            title = room.name,
+                            message = if (room.file in failedRooms) "Nie udało się pobrać danych."
+                                      else "Brak danych dla wybranego zakresu."
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(24.dp))
+                }
 
-                Spacer(modifier = Modifier.height(24.dp))
-
-                TemperatureChart(
-                    title = "Na zewnątrz",
-                    entries = filteredTemperatures,
-                    selector = { it.tempOut },
-                    lineColor = Color(0xFF42A5F5)
-                )
+                // Wilgotność: wszystkie pomieszczenia na jednym wykresie
+                val humiditySeries = ROOMS.mapNotNull { room ->
+                    val points = filteredData[room.file].orEmpty().filter { it.humidity != null }
+                    if (points.size < 2) null else ChartSeries(
+                        label = room.name,
+                        times = points.map { it.timestamp.toEpochSecond() },
+                        values = points.map { it.humidity!! },
+                        color = room.color
+                    )
+                }
+                if (humiditySeries.isEmpty()) {
+                    ChartPlaceholder(title = "Wilgotność", message = "Brak danych dla wybranego zakresu.")
+                } else {
+                    MultiLineChart(
+                        title = "Wilgotność",
+                        series = humiditySeries,
+                        axisFormat = "%.0f%%",
+                        valueFormat = "%.0f%%",
+                        leftMargin = 44.dp,
+                        minPad = 2f
+                    )
+                }
+                Spacer(modifier = Modifier.height(16.dp))
             }
         }
     }
@@ -723,19 +769,18 @@ fun GasScreen(onBackToMenu: () -> Unit) {
     }
 }
 
-// Wykres temperatury (opakowanie ogólnego wykresu liniowego)
+// Wykres temperatury jednego pomieszczenia (opakowanie ogólnego wykresu liniowego)
 @Composable
 fun TemperatureChart(
     title: String,
-    entries: List<TemperatureEntry>,
-    selector: (TemperatureEntry) -> Float,
+    entries: List<RoomEntry>,
     lineColor: Color,
     smoothingWindow: Int = 7
 ) {
     LineChart(
         title = title,
         times = entries.map { it.timestamp.toEpochSecond() },
-        rawValues = entries.map(selector),
+        rawValues = entries.map { it.temperature },
         lineColor = lineColor,
         axisFormat = "%.1f°C",
         valueFormat = "%.1f°C",
@@ -745,7 +790,36 @@ fun TemperatureChart(
     )
 }
 
-// Ogólny wykres liniowy na białym tle: wygładzone dane, krzywa Béziera, oś X z czasu, siatka, min/max
+// Biała karta w miejscu wykresu, gdy nie ma czego narysować
+@Composable
+fun ChartPlaceholder(title: String, message: String) {
+    val darkText = Color(0xFF3A3A3A)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White, RoundedCornerShape(16.dp))
+            .padding(12.dp)
+    ) {
+        Text(
+            text = title,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
+            color = darkText,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(text = message, fontSize = 14.sp, color = darkText.copy(alpha = 0.7f))
+    }
+}
+
+// Jedna seria danych na wykresie (np. wilgotność w jednym pomieszczeniu)
+data class ChartSeries(
+    val label: String,
+    val times: List<Long>,      // czas w sekundach epoki, rosnąco
+    val values: List<Float>,
+    val color: Color
+)
+
+// Ogólny wykres liniowy z jedną serią (temperatura, gaz)
 @Composable
 fun LineChart(
     title: String,
@@ -759,22 +833,53 @@ fun LineChart(
     smoothingWindow: Int = 7,
     showMinMax: Boolean = true
 ) {
+    MultiLineChart(
+        title = title,
+        series = listOf(ChartSeries(title, times, rawValues, lineColor)),
+        axisFormat = axisFormat,
+        valueFormat = valueFormat,
+        leftMargin = leftMargin,
+        minPad = minPad,
+        smoothingWindow = smoothingWindow,
+        showMinMax = showMinMax
+    )
+}
+
+// Wykres liniowy na białym tle z jedną lub kilkoma seriami: wygładzone dane, krzywe Béziera,
+// oś X z czasu, siatka. Jedna seria: min/max pod wykresem. Kilka serii: legenda.
+@Composable
+fun MultiLineChart(
+    title: String,
+    series: List<ChartSeries>,
+    axisFormat: String,         // format etykiet osi Y
+    valueFormat: String,        // format wartości min/max
+    leftMargin: Dp = 44.dp,
+    minPad: Float = 0.5f,
+    smoothingWindow: Int = 7,
+    showMinMax: Boolean = true
+) {
     val darkText = Color(0xFF3A3A3A)
     val textMeasurer = rememberTextMeasurer()
     val labelStyle = TextStyle(fontSize = 11.sp, color = darkText.copy(alpha = 0.8f))
     val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
     val gridColor = Color.Black.copy(alpha = 0.12f)
 
-    val values = remember(rawValues, smoothingWindow) {
-        smoothValues(rawValues, smoothingWindow)
+    // Wygładzone serie; puste i niespójne są pomijane
+    val smoothed = remember(series, smoothingWindow) {
+        series
+            .filter { it.values.isNotEmpty() && it.times.size == it.values.size }
+            .map { it.copy(values = smoothValues(it.values, smoothingWindow)) }
     }
-    if (values.isEmpty() || times.size != values.size) return
+    if (smoothed.isEmpty()) return
 
-    val minV = values.min()
-    val maxV = values.max()
+    val allValues = smoothed.flatMap { it.values }
+    val minV = allValues.min()
+    val maxV = allValues.max()
     val pad = ((maxV - minV) * 0.1f).coerceAtLeast(minPad)
     val yMin = minV - pad
     val yMax = maxV + pad
+    val t0 = smoothed.minOf { it.times.first() }
+    val t1 = smoothed.maxOf { it.times.last() }
 
     Column(
         modifier = Modifier
@@ -800,10 +905,8 @@ fun LineChart(
             val bottom = 24.dp.toPx()
             val chartWidth = size.width - left - right
             val chartHeight = size.height - top - bottom
-            if (times.size < 2) return@Canvas
+            if (smoothed.all { it.times.size < 2 }) return@Canvas
 
-            val t0 = times.first()
-            val t1 = times.last()
             val span = (t1 - t0).coerceAtLeast(1L).toFloat()
             val gridStroke = 1.dp.toPx()
 
@@ -851,60 +954,85 @@ fun LineChart(
                 )
             }
 
-            // Punkty wykresu
-            val points = times.indices.map { i ->
-                val xFraction = (times[i] - t0).toFloat() / span
-                val yFraction = (values[i] - yMin) / (yMax - yMin)
-                Offset(
-                    left + xFraction * chartWidth,
-                    top + (1f - yFraction) * chartHeight
-                )
-            }
-
-            // Gładka krzywa
             val yLow = top
             val yHigh = top + chartHeight
-            val path = Path()
-            path.moveTo(points[0].x, points[0].y)
-            for (i in 1 until points.size) {
-                val p0 = points[(i - 2).coerceAtLeast(0)]
-                val p1 = points[i - 1]
-                val p2 = points[i]
-                val p3 = points[(i + 1).coerceAtMost(points.lastIndex)]
+            for (s in smoothed) {
+                if (s.times.size < 2) continue
 
-                val dx = p2.x - p1.x
-                val dx1 = p2.x - p0.x
-                val dx2 = p3.x - p1.x
-                val m1 = if (dx1 > 0f) (p2.y - p0.y) / dx1 else 0f
-                val m2 = if (dx2 > 0f) (p3.y - p1.y) / dx2 else 0f
+                // Punkty serii
+                val points = s.times.indices.map { i ->
+                    val xFraction = (s.times[i] - t0).toFloat() / span
+                    val yFraction = (s.values[i] - yMin) / (yMax - yMin)
+                    Offset(
+                        left + xFraction * chartWidth,
+                        top + (1f - yFraction) * chartHeight
+                    )
+                }
 
-                val c1x = p1.x + dx / 3f
-                val c1y = (p1.y + m1 * dx / 3f).coerceIn(yLow, yHigh)
-                val c2x = p2.x - dx / 3f
-                val c2y = (p2.y - m2 * dx / 3f).coerceIn(yLow, yHigh)
+                // Gładka krzywa
+                val path = Path()
+                path.moveTo(points[0].x, points[0].y)
+                for (i in 1 until points.size) {
+                    val p0 = points[(i - 2).coerceAtLeast(0)]
+                    val p1 = points[i - 1]
+                    val p2 = points[i]
+                    val p3 = points[(i + 1).coerceAtMost(points.lastIndex)]
 
-                path.cubicTo(c1x, c1y, c2x, c2y, p2.x, p2.y)
-            }
+                    val dx = p2.x - p1.x
+                    val dx1 = p2.x - p0.x
+                    val dx2 = p3.x - p1.x
+                    val m1 = if (dx1 > 0f) (p2.y - p0.y) / dx1 else 0f
+                    val m2 = if (dx2 > 0f) (p3.y - p1.y) / dx2 else 0f
 
-            drawPath(
-                path = path,
-                color = lineColor,
-                style = Stroke(
-                    width = 3.dp.toPx(),
-                    cap = StrokeCap.Round,
-                    join = StrokeJoin.Round
+                    val c1x = p1.x + dx / 3f
+                    val c1y = (p1.y + m1 * dx / 3f).coerceIn(yLow, yHigh)
+                    val c2x = p2.x - dx / 3f
+                    val c2y = (p2.y - m2 * dx / 3f).coerceIn(yLow, yHigh)
+
+                    path.cubicTo(c1x, c1y, c2x, c2y, p2.x, p2.y)
+                }
+
+                drawPath(
+                    path = path,
+                    color = s.color,
+                    style = Stroke(
+                        width = 3.dp.toPx(),
+                        cap = StrokeCap.Round,
+                        join = StrokeJoin.Round
+                    )
                 )
-            )
+            }
         }
 
-        if (showMinMax) {
+        if (smoothed.size > 1) {
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Min/max z wybranego zakresu czasu
+            // Legenda: kolor linii i nazwa serii
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                smoothed.forEach { s ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(width = 12.dp, height = 3.dp)
+                                .background(s.color, RoundedCornerShape(2.dp))
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(text = s.label, fontSize = 12.sp, color = darkText.copy(alpha = 0.8f))
+                    }
+                }
+            }
+        } else if (showMinMax) {
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Min/max z wybranego zakresu czasu (z danych przed wygładzeniem)
             MinMaxRow(
-                values = rawValues,
+                values = series.first().values,
                 valueFormat = valueFormat,
-                lineColor = lineColor
+                lineColor = series.first().color
             )
         }
     }
