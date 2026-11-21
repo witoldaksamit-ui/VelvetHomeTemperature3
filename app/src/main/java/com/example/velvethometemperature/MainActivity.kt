@@ -798,7 +798,7 @@ fun GasContent(gas: GasData) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(text = "Zużycie gazu w ostatnich 24 h", fontSize = 14.sp, color = Cream.copy(alpha = 0.7f))
+        Text(text = "Ostatnie 24h:", fontSize = 14.sp, color = Cream.copy(alpha = 0.7f))
         Text(text = String.format("%.3f m³", usage24), fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Gold)
     }
     Spacer(modifier = Modifier.height(16.dp))
@@ -1059,11 +1059,13 @@ fun MultiLineChart(
                     end = Offset(x, top + chartHeight),
                     strokeWidth = gridStroke
                 )
+                // Etykieta wyśrodkowana pod linią, ale nie wychodzi poza wykres (ostatnia nie łamie się w dwóch wierszach)
+                val timeLayout = textMeasurer.measure(text = timeStr, style = labelStyle)
+                val labelX = (x - timeLayout.size.width / 2f)
+                    .coerceIn(0f, (size.width - timeLayout.size.width).coerceAtLeast(0f))
                 drawText(
-                    textMeasurer = textMeasurer,
-                    text = timeStr,
-                    style = labelStyle,
-                    topLeft = Offset(x - 12.dp.toPx(), size.height - 20.dp.toPx())
+                    textLayoutResult = timeLayout,
+                    topLeft = Offset(labelX, size.height - 20.dp.toPx())
                 )
             }
 
