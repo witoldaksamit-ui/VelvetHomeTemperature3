@@ -83,11 +83,12 @@ data class RoomEntry(
 // Pomieszczenie: nazwa na ekranie, plik z danymi i kolor
 data class Room(val name: String, val file: String, val color: Color)
 
-// Czujnik "sypialnia" wisi za oknem, dlatego na ekranie nazywa się "Dwór"
+// Pomieszczenia w kolejności na ekranie: najpierw wnętrze, na końcu czujnik za oknem
 val ROOMS = listOf(
-    Room("Salon", "temperatures_salon.txt", Color(0xFFEF5350)),     // czerwony
-    Room("Dwór", "temperatures_sypialnia.txt", Color(0xFF66BB6A)),  // zielony
-    Room("Pralnia", "temperatures_pralnia.txt", Color(0xFF42A5F5))  // niebieski
+    Room("Salon", "temperatures_salon.txt", Color(0xFFEF5350)),          // czerwony
+    Room("Sypialnia", "temperatures_sypialnia.txt", Color(0xFFAB47BC)),  // fioletowy
+    Room("Pralnia", "temperatures_pralnia.txt", Color(0xFF42A5F5)),      // niebieski
+    Room("Dwór", "temperatures_dwor.txt", Color(0xFF66BB6A))             // zielony
 )
 
 // Model danych dla jednego odczytu licznika gazu
@@ -551,7 +552,7 @@ fun TemperatureScreen(onBackToMenu: () -> Unit) {
                             Text(room.name, fontSize = 14.sp, color = mutedText)
                             Text(
                                 text = last?.let { String.format("%.1f°C", it.temperature) } ?: "–",
-                                fontSize = 24.sp,
+                                fontSize = 20.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = room.color
                             )
