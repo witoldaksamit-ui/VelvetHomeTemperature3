@@ -38,7 +38,10 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
@@ -49,6 +52,7 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -72,13 +76,14 @@ val VelvetBackground = Brush.verticalGradient(listOf(Color(0xFF4A1233), Color(0x
 interface TemperatureApi {
     // Plik pomieszczenia z repozytorium velvethome.github.io, np. "temperatures_salon.txt"
     @GET("witoldaksamit-ui/velvethome.github.io/main/{file}")
-    suspend fun getRoomFile(@retrofit2.http.Path("file") file: String): String
+    // t: znacznik czasu w adresie, żeby nie dostać starej kopii pliku z pamięci podręcznej
+    suspend fun getRoomFile(@retrofit2.http.Path("file") file: String, @retrofit2.http.Query("t") t: Long): String
 }
 
 interface GasApi {
     // Surowy plik z odczytami licznika gazu (format: "2026-10-30 16:07:24 | 106.973")
     @GET("witoldaksamit-ui/licznik_gazu/main/odczyty24h.txt")
-    suspend fun getReadings(): String
+    suspend fun getReadings(@retrofit2.http.Query("t") t: Long): String
 }
 
 // 2. Model danych dla jednego pomiaru w pomieszczeniu (temperatura i wilgotność)
@@ -376,7 +381,8 @@ private val Gold = Color(0xFFFFC96B)
 private val Panel = Color(0xFF2A0B1C)
 private val Plum = Color(0xFF9C2A5E)
 private val ErrorRed = Color(0xFFFF8A80)
-private const val STALE_MINUTES = 60L   // odczyt starszy niż godzina jest oznaczany jako nieaktualny
+private const val STALE_MINUTES = 60L
+private const val REFRESH_MS = 60_000L   // automatyczne odświeżanie danych co minutę   // odczyt starszy niż godzina jest oznaczany jako nieaktualny
 
 private fun rawRetrofit(): Retrofit = Retrofit.Builder()
     .baseUrl("https://raw.githubusercontent.com/")
@@ -388,7 +394,7 @@ suspend fun loadRooms(): RoomsData {
     val api = rawRetrofit().create(TemperatureApi::class.java)
     val results = withContext(Dispatchers.IO) {
         ROOMS.map { room ->
-            async { room.file to runCatching { parseRoomData(api.getRoomFile(room.file)) } }
+            async { room.file to runCatching { parseRoomData(api.getRoomFile(room.file, System.currentTimeMillis())) } }
         }.awaitAll()
     }
     val data = results.mapNotNull { (file, result) -> result.getOrNull()?.let { file to it } }.toMap()
@@ -399,8 +405,21 @@ suspend fun loadRooms(): RoomsData {
     return RoomsData(data, failed, loading = false, error = error)
 }
 
+// Łączy odświeżone dane z poprzednimi: pomieszczenie, którego nie udało się pobrać,
+// zachowuje ostatnie dane (kafelek pokaże wtedy godzinę pomiaru i ewentualnie „nieaktualne”)
+fun mergeRooms(old: RoomsData, new: RoomsData): RoomsData {
+    if (old.data.isEmpty()) return new
+    val data = old.data + new.data
+    return RoomsData(
+        data = data,
+        failed = new.failed.filter { it !in data }.toSet(),
+        loading = false,
+        error = null
+    )
+}
+
 suspend fun loadGas(): GasData = try {
-    val raw = withContext(Dispatchers.IO) { rawRetrofit().create(GasApi::class.java).getReadings() }
+    val raw = withContext(Dispatchers.IO) { rawRetrofit().create(GasApi::class.java).getReadings(System.currentTimeMillis()) }
     val readings = parseGasReadings(raw)
     GasData(readings, loading = false, error = if (readings.isEmpty()) "Brak odczytów w pliku" else null)
 } catch (e: Exception) {
@@ -415,9 +434,24 @@ fun HomeScreen() {
     var rooms by remember { mutableStateOf(RoomsData()) }
     var gas by remember { mutableStateOf(GasData()) }
 
-    // Dane pobierane raz przy starcie; przełączanie zakładek ich nie pobiera ponownie
-    LaunchedEffect(Unit) { rooms = loadRooms() }
-    LaunchedEffect(Unit) { gas = loadGas() }
+    // Dane odświeżane co minutę, ale tylko gdy aplikacja jest na ekranie (w tle nic nie pobiera).
+    // Po powrocie do aplikacji odświeżenie następuje od razu.
+    val lifecycle = (LocalContext.current as ComponentActivity).lifecycle
+    LaunchedEffect(lifecycle) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                coroutineScope {
+                    launch { rooms = mergeRooms(rooms, loadRooms()) }
+                    launch {
+                        val fresh = loadGas()
+                        // przy chwilowym błędzie zostają poprzednie odczyty
+                        gas = if (fresh.error != null && gas.readings.isNotEmpty()) gas else fresh
+                    }
+                }
+                delay(REFRESH_MS)
+            }
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -946,7 +980,8 @@ fun MultiLineChart(
     val multi = smoothed.size > 1
 
     // Okienko z wartością po dotknięciu wykresu: (indeks serii, indeks punktu) albo null
-    var selected by remember(series) { mutableStateOf<Pair<Int, Int>?>(null) }
+    // Zostaje po odświeżeniu danych co minutę; znika przy zmianie zakresu (inna długość osi czasu)
+    var selected by remember(title, (t1 - t0) / 3600) { mutableStateOf<Pair<Int, Int>?>(null) }
     val density = LocalDensity.current
     val leftPx = with(density) { leftMargin.toPx() }
     val rightPx = with(density) { 16.dp.toPx() }
