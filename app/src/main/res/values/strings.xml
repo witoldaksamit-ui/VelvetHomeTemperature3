@@ -1,3 +1,5 @@
 <resources>
     <string name="app_name">VelvetHomeTemperature</string>
+    <string name="widget_name">VelvetHome: salon i dwór</string>
+    <string name="widget_description">Temperatura w salonie i na dworze</string>
 </resources>

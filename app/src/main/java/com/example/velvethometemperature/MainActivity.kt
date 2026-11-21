@@ -49,6 +49,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.glance.appwidget.updateAll
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -436,12 +437,21 @@ fun HomeScreen() {
 
     // Dane odświeżane co minutę, ale tylko gdy aplikacja jest na ekranie (w tle nic nie pobiera).
     // Po powrocie do aplikacji odświeżenie następuje od razu.
-    val lifecycle = (LocalContext.current as ComponentActivity).lifecycle
+    val context = LocalContext.current
+    val lifecycle = (context as ComponentActivity).lifecycle
     LaunchedEffect(lifecycle) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            var widgetRefreshed = false
             while (true) {
                 coroutineScope {
-                    launch { rooms = mergeRooms(rooms, loadRooms()) }
+                    launch {
+                        rooms = mergeRooms(rooms, loadRooms())
+                        // Po otwarciu aplikacji widget na ekranie głównym też dostaje świeże dane
+                        if (!widgetRefreshed && rooms.data.isNotEmpty()) {
+                            widgetRefreshed = true
+                            runCatching { VelvetWidget().updateAll(context) }
+                        }
+                    }
                     launch {
                         val fresh = loadGas()
                         // przy chwilowym błędzie zostają poprzednie odczyty

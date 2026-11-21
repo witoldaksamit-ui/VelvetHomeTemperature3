@@ -56,6 +56,9 @@ dependencies {
     implementation("com.squareup.retrofit2:retrofit:2.11.0")
     // Konwerter do pobierania surowego tekstu z pliku .txt
     implementation("com.squareup.retrofit2:converter-scalars:2.11.0")
+    // --- WIDGET NA EKRAN GŁÓWNY (Jetpack Glance) i odświeżanie go w tle ---
+    implementation("androidx.glance:glance-appwidget:1.1.1")
+    implementation("androidx.work:work-runtime-ktx:2.10.0")
 
 
 
