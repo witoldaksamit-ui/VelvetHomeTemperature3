@@ -12,6 +12,8 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -32,6 +34,8 @@ import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
@@ -864,11 +868,12 @@ fun MultiLineChart(
     val timeFormatter = DateTimeFormatter.ofPattern("HH:mm")
     val gridColor = Color.Black.copy(alpha = 0.12f)
 
-    // Wygładzone serie; puste i niespójne są pomijane
-    val smoothed = remember(series, smoothingWindow) {
-        series
-            .filter { it.values.isNotEmpty() && it.times.size == it.values.size }
-            .map { it.copy(values = smoothValues(it.values, smoothingWindow)) }
+    // Serie z danymi (surowe wartości do okienka) i ich wygładzone wersje do rysowania - te same indeksy
+    val rawSeries = remember(series) {
+        series.filter { it.values.isNotEmpty() && it.times.size == it.values.size }
+    }
+    val smoothed = remember(rawSeries, smoothingWindow) {
+        rawSeries.map { it.copy(values = smoothValues(it.values, smoothingWindow)) }
     }
     if (smoothed.isEmpty()) return
 
@@ -880,6 +885,40 @@ fun MultiLineChart(
     val yMax = maxV + pad
     val t0 = smoothed.minOf { it.times.first() }
     val t1 = smoothed.maxOf { it.times.last() }
+    val multi = smoothed.size > 1
+
+    // Okienko z wartością po dotknięciu wykresu: (indeks serii, indeks punktu) albo null
+    var selected by remember(series) { mutableStateOf<Pair<Int, Int>?>(null) }
+    val density = LocalDensity.current
+    val leftPx = with(density) { leftMargin.toPx() }
+    val rightPx = with(density) { 16.dp.toPx() }
+    val topPx = with(density) { 8.dp.toPx() }
+    val bottomPx = with(density) { 24.dp.toPx() }
+    val spanAll = (t1 - t0).coerceAtLeast(1L).toFloat()
+
+    // Położenie punktu na płótnie o rozmiarze w x h
+    fun pointPos(si: Int, i: Int, w: Float, h: Float): Offset {
+        val s = smoothed[si]
+        val x = leftPx + (s.times[i] - t0).toFloat() / spanAll * (w - leftPx - rightPx)
+        val y = topPx + (1f - (s.values[i] - yMin) / (yMax - yMin)) * (h - topPx - bottomPx)
+        return Offset(x, y)
+    }
+
+    // Jedna seria: najbliższy punkt w poziomie. Kilka serii: najbliższy punkt na płaszczyźnie,
+    // czyli wybierana jest linia, której dotyka palec.
+    fun pick(touch: Offset, w: Float, h: Float): Pair<Int, Int>? {
+        var best: Pair<Int, Int>? = null
+        var bestDist = Float.MAX_VALUE
+        smoothed.forEachIndexed { si, s ->
+            if (s.times.size < 2) return@forEachIndexed
+            for (i in s.times.indices) {
+                val q = pointPos(si, i, w, h)
+                val d = if (multi) (q - touch).getDistanceSquared() else kotlin.math.abs(q.x - touch.x)
+                if (d < bestDist) { bestDist = d; best = si to i }
+            }
+        }
+        return best
+    }
 
     Column(
         modifier = Modifier
@@ -898,6 +937,22 @@ fun MultiLineChart(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(200.dp)
+                // Dotknięcie pokazuje okienko, przesuwanie palcem w poziomie przesuwa je po wykresie;
+                // przewijanie ekranu w pionie działa dalej
+                .pointerInput(smoothed) {
+                    detectTapGestures(onPress = { p ->
+                        selected = pick(p, size.width.toFloat(), size.height.toFloat())
+                    })
+                }
+                .pointerInput(smoothed) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { p -> selected = pick(p, size.width.toFloat(), size.height.toFloat()) },
+                        onHorizontalDrag = { change, _ ->
+                            change.consume()
+                            selected = pick(change.position, size.width.toFloat(), size.height.toFloat())
+                        }
+                    )
+                }
         ) {
             val left = leftMargin.toPx()
             val right = 16.dp.toPx()
@@ -956,8 +1011,10 @@ fun MultiLineChart(
 
             val yLow = top
             val yHigh = top + chartHeight
-            for (s in smoothed) {
-                if (s.times.size < 2) continue
+            smoothed.forEachIndexed { si, s ->
+                if (s.times.size < 2) return@forEachIndexed
+                // Kilka serii z wybraną linią: pozostałe są przygaszone
+                val lineColor = if (multi && selected != null && selected?.first != si) s.color.copy(alpha = 0.25f) else s.color
 
                 // Punkty serii
                 val points = s.times.indices.map { i ->
@@ -994,13 +1051,50 @@ fun MultiLineChart(
 
                 drawPath(
                     path = path,
-                    color = s.color,
+                    color = lineColor,
                     style = Stroke(
                         width = 3.dp.toPx(),
                         cap = StrokeCap.Round,
                         join = StrokeJoin.Round
                     )
                 )
+            }
+
+            // Okienko z wybranym pomiarem: pionowa linia, punkt i ramka z godziną i wartością
+            selected?.let { (si, i) ->
+                if (si >= smoothed.size || i >= smoothed[si].times.size) return@let
+                val s = smoothed[si]
+                val pt = pointPos(si, i, size.width, size.height)
+                drawLine(
+                    color = darkText.copy(alpha = 0.35f),
+                    start = Offset(pt.x, top),
+                    end = Offset(pt.x, top + chartHeight),
+                    strokeWidth = 1.dp.toPx()
+                )
+                drawCircle(color = Color.White, radius = 6.dp.toPx(), center = pt)
+                drawCircle(color = s.color, radius = 4.dp.toPx(), center = pt)
+
+                val time = Instant.ofEpochSecond(s.times[i]).atZone(ZoneId.systemDefault()).format(timeFormatter)
+                val value = String.format(valueFormat, rawSeries[si].values[i])
+                val text = if (multi) "$time  ${s.label}: $value" else "$time  $value"
+                val layout = textMeasurer.measure(
+                    text = text,
+                    style = TextStyle(fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                )
+                val padX = 8.dp.toPx()
+                val padY = 5.dp.toPx()
+                val boxW = layout.size.width + 2 * padX
+                val boxH = layout.size.height + 2 * padY
+                val boxX = (pt.x - boxW / 2).coerceIn(0f, (size.width - boxW).coerceAtLeast(0f))
+                val above = pt.y - boxH - 10.dp.toPx()
+                val boxY = if (above >= 0f) above else pt.y + 10.dp.toPx()
+                drawRoundRect(
+                    color = Color(0xE62A0B1C),
+                    topLeft = Offset(boxX, boxY),
+                    size = Size(boxW, boxH),
+                    cornerRadius = CornerRadius(6.dp.toPx())
+                )
+                drawText(textLayoutResult = layout, topLeft = Offset(boxX + padX, boxY + padY))
             }
         }
 
