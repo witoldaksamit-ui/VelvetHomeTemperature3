@@ -12,6 +12,7 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -23,6 +24,8 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -57,6 +60,7 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
+import kotlin.math.roundToInt
 
 // Miękka krzywa łagodzenia (odpowiednik EaseInOutSine)
 val SoftEasing = CubicBezierEasing(0.37f, 0f, 0.63f, 1f)
@@ -81,7 +85,8 @@ interface GasApi {
 data class RoomEntry(
     val timestamp: ZonedDateTime,
     val temperature: Float,
-    val humidity: Float?        // null, gdy w pliku nie ma wilgotności
+    val humidity: Float?,       // null, gdy w pliku nie ma wilgotności
+    val battery: String? = null // stan baterii z 4. kolumny: procent albo low / middle / high
 )
 
 // Pomieszczenie: nazwa na ekranie, plik z danymi i kolor
@@ -110,7 +115,7 @@ enum class TimeRange(val hours: Long, val label: String) {
 
 // Reprezentacja stanów ekranu dla modułu nawigacji
 enum class AppScreen {
-    SPLASH, MENU, TEMPERATURE, GAS
+    SPLASH, HOME
 }
 
 class MainActivity : ComponentActivity() {
@@ -266,92 +271,22 @@ fun SplashScreen() {
 fun AppRoot() {
     var currentScreen by rememberSaveable { mutableStateOf(AppScreen.SPLASH) }
 
-    // Logika przejścia ze Splash Screena do Menu głównego
+    // Po splashu ekran główny z zakładkami
     if (currentScreen == AppScreen.SPLASH) {
         LaunchedEffect(Unit) {
             delay(4000) // czas wyświetlania splasha
-            currentScreen = AppScreen.MENU
+            currentScreen = AppScreen.HOME
         }
     }
 
-    when (currentScreen) {
-        // Płynne przejście wyłącznie między splashem a pierwszą kartą (menu)
-        AppScreen.SPLASH, AppScreen.MENU -> {
-            Crossfade(
-                targetState = currentScreen,
-                animationSpec = tween(durationMillis = 1000, easing = SoftEasing),
-                label = "splash_to_menu"
-            ) { screen ->
-                when (screen) {
-                    AppScreen.SPLASH -> SplashScreen()
-                    AppScreen.MENU -> MenuScreen(
-                        onNavigateToTemperature = { currentScreen = AppScreen.TEMPERATURE },
-                        onNavigateToGas = { currentScreen = AppScreen.GAS }
-                    )
-                    else -> Unit
-                }
-            }
-        }
-        // Pozostałe przejścia są twarde (bez animacji)
-        AppScreen.TEMPERATURE -> TemperatureScreen(
-            onBackToMenu = { currentScreen = AppScreen.MENU }
-        )
-        AppScreen.GAS -> GasScreen(
-            onBackToMenu = { currentScreen = AppScreen.MENU }
-        )
-    }
-}
-
-// Menu wyboru po ekranie powitalnym
-@Composable
-fun MenuScreen(
-    onNavigateToTemperature: () -> Unit,
-    onNavigateToGas: () -> Unit
-) {
-    val cream = Color(0xFFF7E9D7)
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(VelvetBackground),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
-            modifier = Modifier.padding(24.dp)
-        ) {
-            Text(
-                text = "VelvetHome",
-                fontSize = 32.sp,
-                fontWeight = FontWeight.Bold,
-                color = cream,
-                modifier = Modifier.padding(bottom = 48.dp)
-            )
-
-            Button(
-                onClick = onNavigateToTemperature,
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF9C2A5E)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(60.dp),
-                shape = MaterialTheme.shapes.medium
-            ) {
-                Text(text = "Temperatura", fontSize = 18.sp, color = cream, fontWeight = FontWeight.SemiBold)
-            }
-
-            Spacer(modifier = Modifier.height(20.dp))
-
-            Button(
-                onClick = onNavigateToGas,
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF5E1239)),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(60.dp),
-                shape = MaterialTheme.shapes.medium
-            ) {
-                Text(text = "Licznik Gazu", fontSize = 18.sp, color = cream, fontWeight = FontWeight.SemiBold)
-            }
+    Crossfade(
+        targetState = currentScreen,
+        animationSpec = tween(durationMillis = 1000, easing = SoftEasing),
+        label = "splash_to_home"
+    ) { screen ->
+        when (screen) {
+            AppScreen.SPLASH -> SplashScreen()
+            AppScreen.HOME -> HomeScreen()
         }
     }
 }
@@ -369,7 +304,8 @@ fun parseRoomData(rawText: String): List<RoomEntry> {
             RoomEntry(
                 timestamp = ZonedDateTime.parse(tokens[0].trim(), formatter),
                 temperature = tokens[1].trim().toFloat(),
-                humidity = tokens.getOrNull(2)?.trim()?.toFloatOrNull()
+                humidity = tokens.getOrNull(2)?.trim()?.toFloatOrNull(),
+                battery = tokens.getOrNull(3)?.trim()?.takeIf { it.isNotEmpty() }
             )
         } catch (e: Exception) {
             android.util.Log.e("ROOM_PARSE", "Błąd w linii: $trimmed", e)
@@ -411,54 +347,77 @@ fun smoothValues(values: List<Float>, window: Int): List<Float> {
     }
 }
 
-// Ekran temperatury i wilgotności: salon, na zewnątrz i pralnia
+// ---------- Ekran główny: pasek zakładek u góry (jak strona na telefonie) ----------
+
+// Zakładki ekranu głównego
+enum class HomeTab(val label: String) {
+    TEMPERATURE("Temperatura"),
+    HUMIDITY("Wilgotność"),
+    GAS("Licznik gazu")
+}
+
+// Dane pomieszczeń pobrane z GitHuba (nazwa pliku -> pomiary)
+data class RoomsData(
+    val data: Map<String, List<RoomEntry>> = emptyMap(),
+    val failed: Set<String> = emptySet(),
+    val loading: Boolean = true,
+    val error: String? = null
+)
+
+// Odczyty licznika gazu
+data class GasData(
+    val readings: List<GasReading> = emptyList(),
+    val loading: Boolean = true,
+    val error: String? = null
+)
+
+private val Cream = Color(0xFFF7E9D7)
+private val Gold = Color(0xFFFFC96B)
+private val Panel = Color(0xFF2A0B1C)
+private val Plum = Color(0xFF9C2A5E)
+private val ErrorRed = Color(0xFFFF8A80)
+private const val STALE_MINUTES = 60L   // odczyt starszy niż godzina jest oznaczany jako nieaktualny
+
+private fun rawRetrofit(): Retrofit = Retrofit.Builder()
+    .baseUrl("https://raw.githubusercontent.com/")
+    .addConverterFactory(ScalarsConverterFactory.create())
+    .build()
+
+// Pobiera pliki wszystkich pomieszczeń równolegle; błąd jednego nie blokuje pozostałych
+suspend fun loadRooms(): RoomsData {
+    val api = rawRetrofit().create(TemperatureApi::class.java)
+    val results = withContext(Dispatchers.IO) {
+        ROOMS.map { room ->
+            async { room.file to runCatching { parseRoomData(api.getRoomFile(room.file)) } }
+        }.awaitAll()
+    }
+    val data = results.mapNotNull { (file, result) -> result.getOrNull()?.let { file to it } }.toMap()
+    val failed = results.filter { it.second.isFailure }.map { it.first }.toSet()
+    val error = if (data.isEmpty()) {
+        "Błąd pobierania danych: ${results.firstNotNullOfOrNull { it.second.exceptionOrNull() }?.localizedMessage}"
+    } else null
+    return RoomsData(data, failed, loading = false, error = error)
+}
+
+suspend fun loadGas(): GasData = try {
+    val raw = withContext(Dispatchers.IO) { rawRetrofit().create(GasApi::class.java).getReadings() }
+    val readings = parseGasReadings(raw)
+    GasData(readings, loading = false, error = if (readings.isEmpty()) "Brak odczytów w pliku" else null)
+} catch (e: Exception) {
+    GasData(loading = false, error = "Błąd pobierania danych: ${e.localizedMessage}")
+}
+
 @Composable
-fun TemperatureScreen(onBackToMenu: () -> Unit) {
-    var isLoading by remember { mutableStateOf(true) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-    // nazwa pliku -> pomiary (tylko pliki pobrane bez błędu)
-    var roomData by remember { mutableStateOf<Map<String, List<RoomEntry>>>(emptyMap()) }
-    var failedRooms by remember { mutableStateOf<Set<String>>(emptySet()) }
-    var selectedRange by remember { mutableStateOf(TimeRange.LAST_24H) }
-    val cream = Color(0xFFF7E9D7)
-    val gold = Color(0xFFFFC96B)
-    val mutedText = cream.copy(alpha = 0.7f)
+fun HomeScreen() {
+    var tab by rememberSaveable { mutableStateOf(HomeTab.TEMPERATURE) }
+    // Zakres wykresów wspólny dla temperatury i wilgotności (jak na stronie)
+    var selectedRange by rememberSaveable { mutableStateOf(TimeRange.LAST_24H) }
+    var rooms by remember { mutableStateOf(RoomsData()) }
+    var gas by remember { mutableStateOf(GasData()) }
 
-    LaunchedEffect(Unit) {
-        val retrofit = Retrofit.Builder()
-            .baseUrl("https://raw.githubusercontent.com/")
-            .addConverterFactory(ScalarsConverterFactory.create())
-            .build()
-        val api = retrofit.create(TemperatureApi::class.java)
-
-        // Pliki pobierane równolegle; błąd jednego nie blokuje pozostałych
-        val results = withContext(Dispatchers.IO) {
-            ROOMS.map { room ->
-                async { room.file to runCatching { parseRoomData(api.getRoomFile(room.file)) } }
-            }.awaitAll()
-        }
-
-        roomData = results
-            .mapNotNull { (file, result) -> result.getOrNull()?.let { file to it } }
-            .toMap()
-        failedRooms = results.filter { it.second.isFailure }.map { it.first }.toSet()
-        if (roomData.isEmpty()) {
-            val cause = results.firstNotNullOfOrNull { it.second.exceptionOrNull() }
-            errorMessage = "Błąd pobierania danych: ${cause?.localizedMessage}"
-        }
-        isLoading = false
-    }
-
-    // Najnowszy pomiar ze wszystkich pomieszczeń - od niego liczymy wybrany zakres
-    val latestTime = remember(roomData) {
-        roomData.values.flatten().maxOfOrNull { it.timestamp }
-    }
-    val filteredData = remember(roomData, selectedRange) {
-        val cutoff = latestTime?.minusHours(selectedRange.hours)
-        roomData.mapValues { (_, entries) ->
-            if (cutoff == null) entries else entries.filter { !it.timestamp.isBefore(cutoff) }
-        }
-    }
+    // Dane pobierane raz przy starcie; przełączanie zakładek ich nie pobiera ponownie
+    LaunchedEffect(Unit) { rooms = loadRooms() }
+    LaunchedEffect(Unit) { gas = loadGas() }
 
     Column(
         modifier = Modifier
@@ -466,311 +425,410 @@ fun TemperatureScreen(onBackToMenu: () -> Unit) {
             .background(VelvetBackground)
             .statusBarsPadding()
             .navigationBarsPadding()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        // Pasek nawigacyjny z przyciskiem powrotu do Menu
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Start
-        ) {
-            TextButton(onClick = onBackToMenu) {
-                Text(text = "← Powrót", color = cream, fontSize = 16.sp)
-            }
-        }
-
-        Spacer(modifier = Modifier.height(8.dp))
-
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 16.dp),
-            horizontalArrangement = Arrangement.SpaceEvenly
-        ) {
-            TimeRange.values().forEach { range ->
-                FilterChip(
-                    selected = selectedRange == range,
-                    onClick = { selectedRange = range },
-                    label = { Text(range.label, fontSize = 12.sp) },
-                    colors = FilterChipDefaults.filterChipColors(
-                        containerColor = Color.Transparent,
-                        labelColor = cream,
-                        selectedContainerColor = Color(0xFF9C2A5E),
-                        selectedLabelColor = cream
-                    ),
-                    border = FilterChipDefaults.filterChipBorder(
-                        enabled = true,
-                        selected = selectedRange == range,
-                        borderColor = cream.copy(alpha = 0.5f),
-                        selectedBorderColor = gold
-                    )
-                )
-            }
-        }
-
-        if (latestTime != null) {
-            val lastUpdate = latestTime
-                .withZoneSameInstant(ZoneId.systemDefault())
-                .format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm"))
-            Text(
-                text = "Ostatnia aktualizacja: $lastUpdate",
-                fontSize = 14.sp,
-                color = mutedText
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-        }
-
         Text(
-            text = "Temperatura – ${selectedRange.label}",
-            fontSize = 20.sp,
+            text = "VelvetHome",
+            fontSize = 26.sp,
             fontWeight = FontWeight.Bold,
-            color = cream,
-            modifier = Modifier.padding(bottom = 16.dp)
+            color = Cream,
+            letterSpacing = 1.5.sp,
+            modifier = Modifier
+                .align(Alignment.CenterHorizontally)
+                .padding(top = 16.dp, bottom = 12.dp)
         )
 
-        when {
-            isLoading -> {
-                CircularProgressIndicator(
-                    color = gold,
-                    modifier = Modifier.align(Alignment.CenterHorizontally)
-                )
-            }
-            errorMessage != null -> {
-                Text(text = errorMessage!!, color = Color(0xFFFF8A80), fontSize = 16.sp)
-            }
-            else -> {
-                // Bieżące odczyty: temperatura i wilgotność w każdym pomieszczeniu
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 16.dp),
-                    horizontalArrangement = Arrangement.SpaceAround
-                ) {
-                    ROOMS.forEach { room ->
-                        val last = roomData[room.file]?.lastOrNull()
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text(room.name, fontSize = 14.sp, color = mutedText)
-                            Text(
-                                text = last?.let { String.format("%.1f°C", it.temperature) } ?: "–",
-                                fontSize = 20.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = room.color
-                            )
-                            Text(
-                                text = last?.humidity?.let { String.format("%.0f%%", it) } ?: "",
-                                fontSize = 14.sp,
-                                color = cream
-                            )
-                        }
-                    }
-                }
+        // Pasek zakładek zostaje na górze, przewija się tylko treść pod nim
+        TabBar(selected = tab, onSelect = { tab = it }, modifier = Modifier.padding(horizontal = 16.dp))
 
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // Wykres temperatury dla każdego pomieszczenia
-                ROOMS.forEach { room ->
-                    val entries = filteredData[room.file].orEmpty()
-                    if (entries.size >= 2) {
-                        TemperatureChart(title = room.name, entries = entries, lineColor = room.color)
-                    } else {
-                        ChartPlaceholder(
-                            title = room.name,
-                            message = if (room.file in failedRooms) "Nie udało się pobrać danych."
-                                      else "Brak danych dla wybranego zakresu."
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(24.dp))
+        // Każda zakładka ma własną pozycję przewijania
+        key(tab) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                when (tab) {
+                    HomeTab.TEMPERATURE -> TemperatureContent(rooms, selectedRange) { selectedRange = it }
+                    HomeTab.HUMIDITY -> HumidityContent(rooms, selectedRange) { selectedRange = it }
+                    HomeTab.GAS -> GasContent(gas)
                 }
-
-                // Wilgotność: wszystkie pomieszczenia na jednym wykresie
-                val humiditySeries = ROOMS.mapNotNull { room ->
-                    val points = filteredData[room.file].orEmpty().filter { it.humidity != null }
-                    if (points.size < 2) null else ChartSeries(
-                        label = room.name,
-                        times = points.map { it.timestamp.toEpochSecond() },
-                        values = points.map { it.humidity!! },
-                        color = room.color
-                    )
-                }
-                if (humiditySeries.isEmpty()) {
-                    ChartPlaceholder(title = "Wilgotność", message = "Brak danych dla wybranego zakresu.")
-                } else {
-                    MultiLineChart(
-                        title = "Wilgotność",
-                        series = humiditySeries,
-                        axisFormat = "%.0f%%",
-                        valueFormat = "%.0f%%",
-                        leftMargin = 44.dp,
-                        minPad = 2f
-                    )
-                }
-                Spacer(modifier = Modifier.height(16.dp))
             }
         }
     }
 }
 
-// Ekran licznika gazu: aktualny stan + wykresy z ostatnich 24h
+// Pasek trzech zakładek z ikonami; wybrana na śliwkowym tle ze złotym paskiem z lewej
 @Composable
-fun GasScreen(onBackToMenu: () -> Unit) {
-    val cream = Color(0xFFF7E9D7)
-    var readings by remember { mutableStateOf<List<GasReading>>(emptyList()) }
-    var errorMessage by remember { mutableStateOf<String?>(null) }
-    var isLoading by remember { mutableStateOf(true) }
-
-    LaunchedEffect(Unit) {
-        try {
-            val retrofit = Retrofit.Builder()
-                .baseUrl("https://raw.githubusercontent.com/")
-                .addConverterFactory(ScalarsConverterFactory.create())
-                .build()
-
-            val api = retrofit.create(GasApi::class.java)
-            val rawText = withContext(Dispatchers.IO) { api.getReadings() }
-
-            readings = parseGasReadings(rawText)
-            if (readings.isEmpty()) errorMessage = "Brak odczytów w pliku"
-        } catch (e: Exception) {
-            errorMessage = "Błąd pobierania danych: ${e.localizedMessage}"
-        } finally {
-            isLoading = false
-        }
-    }
-
-    val latestReading = readings.lastOrNull()
-    val zone = ZoneId.systemDefault()
-
-    // Dane do wykresów z ostatnich 24h (względem ostatniego odczytu)
-    val cutoff = latestReading?.timestamp?.minusHours(24)
-    val levelReadings = remember(readings) {
-        if (cutoff == null) emptyList() else readings.filter { !it.timestamp.isBefore(cutoff) }
-    }
-    // Chwilowe zużycie = różnica między kolejnymi odczytami (Δ m³)
-    val deltaTimes = remember(readings) {
-        if (cutoff == null) emptyList() else
-            readings.drop(1).filter { !it.timestamp.isBefore(cutoff) }
-                .map { it.timestamp.atZone(zone).toEpochSecond() }
-    }
-    val deltaValues = remember(readings) {
-        if (cutoff == null) emptyList() else
-            readings.zipWithNext()
-                .filter { (_, cur) -> !cur.timestamp.isBefore(cutoff) }
-                .map { (prev, cur) -> (cur.value - prev.value).toFloat() }
-    }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(VelvetBackground)
-            .statusBarsPadding()
-            .navigationBarsPadding()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
+fun TabBar(selected: HomeTab, onSelect: (HomeTab) -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(Panel, RoundedCornerShape(16.dp))
+            .padding(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.Start
-        ) {
-            TextButton(onClick = onBackToMenu) {
-                Text(text = "← Powrót", color = cream, fontSize = 16.sp)
-            }
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        latestReading?.let {
-            Text(
-                text = "Ostatnia aktualizacja: " +
-                        it.timestamp.format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm")),
-                fontSize = 14.sp,
-                color = cream.copy(alpha = 0.7f)
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-        }
-
-        Text(text = "Stan Licznika Gazu", fontSize = 24.sp, color = cream, fontWeight = FontWeight.Bold)
-        Spacer(modifier = Modifier.height(32.dp))
-
-        when {
-            isLoading -> CircularProgressIndicator(color = Color(0xFFFFC96B))
-            errorMessage != null -> Text(
-                text = errorMessage!!,
-                color = Color(0xFFFF8A80),
-                fontSize = 16.sp
-            )
-            else -> {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = Color(0xFF2A0B1C)),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp),
-                    shape = MaterialTheme.shapes.large
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(32.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
-                        Text(
-                            text = "BIEŻĄCY ODCZYT",
-                            fontSize = 12.sp,
-                            color = Color(0xFFFFC96B),
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.5.sp
-                        )
-                        Spacer(modifier = Modifier.height(24.dp))
-                        Text(
-                            text = String.format("%.3f m³", latestReading!!.value),
-                            fontSize = 42.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = cream,
-                            letterSpacing = 1.sp
-                        )
+        HomeTab.values().forEach { t ->
+            val active = t == selected
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(if (active) Plum else Color.Transparent)
+                    .drawBehind {
+                        if (active) drawRect(Gold, size = Size(3.dp.toPx(), size.height))
                     }
-                }
-
-                Spacer(modifier = Modifier.height(32.dp))
-
-                // Wykres 1: skumulowany stan licznika z ostatnich 24h
-                LineChart(
-                    title = "Zmiana stanu licznika – ostatnie 24h (m³)",
-                    times = levelReadings.map { it.timestamp.atZone(zone).toEpochSecond() },
-                    rawValues = levelReadings.map { it.value.toFloat() },
-                    lineColor = Color(0xFFEF6C00),
-                    axisFormat = "%.3f",
-                    valueFormat = "%.3f m³",
-                    leftMargin = 52.dp,
-                    minPad = 0.005f,
-                    smoothingWindow = 1,
-                    showMinMax = false
+                    .clickable { onSelect(t) }
+                    .padding(vertical = 8.dp)
+            ) {
+                TabIcon(t, Cream)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = t.label,
+                    fontSize = 13.sp,
+                    color = Cream,
+                    fontWeight = if (active) FontWeight.Bold else FontWeight.Normal
                 )
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                // Wykres 2: chwilowe zużycie (Δ m³ między odczytami)
-                LineChart(
-                    title = "Chwilowe zużycie gazu – ostatnie 24h (Δ m³)",
-                    times = deltaTimes,
-                    rawValues = deltaValues,
-                    lineColor = Color(0xFF8E24AA),
-                    axisFormat = "%.3f",
-                    valueFormat = "%.3f m³",
-                    leftMargin = 52.dp,
-                    minPad = 0.001f,
-                    smoothingWindow = 1,
-                    showMinMax = false
-                )
-
-                Spacer(modifier = Modifier.height(16.dp))
             }
         }
     }
+}
+
+// Proste ikony rysowane linią: termometr, kropla, płomień
+@Composable
+fun TabIcon(tab: HomeTab, color: Color) {
+    Canvas(modifier = Modifier.size(22.dp)) {
+        val w = size.width
+        val stroke = Stroke(width = 1.8.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round)
+        val path = Path()
+        when (tab) {
+            HomeTab.TEMPERATURE -> {
+                path.moveTo(w * 0.58f, w * 0.62f)
+                path.lineTo(w * 0.58f, w * 0.21f)
+                path.cubicTo(w * 0.58f, w * 0.12f, w * 0.42f, w * 0.12f, w * 0.42f, w * 0.21f)
+                path.lineTo(w * 0.42f, w * 0.62f)
+                drawPath(path, color, style = stroke)
+                drawCircle(color, radius = w * 0.17f, center = Offset(w * 0.5f, w * 0.75f), style = stroke)
+                drawLine(color, Offset(w * 0.5f, w * 0.46f), Offset(w * 0.5f, w * 0.7f), strokeWidth = 1.8.dp.toPx(), cap = StrokeCap.Round)
+            }
+            HomeTab.HUMIDITY -> {
+                path.moveTo(w * 0.5f, w * 0.12f)
+                path.cubicTo(w * 0.5f, w * 0.12f, w * 0.75f, w * 0.42f, w * 0.75f, w * 0.6f)
+                path.cubicTo(w * 0.75f, w * 0.75f, w * 0.64f, w * 0.86f, w * 0.5f, w * 0.86f)
+                path.cubicTo(w * 0.36f, w * 0.86f, w * 0.25f, w * 0.75f, w * 0.25f, w * 0.6f)
+                path.cubicTo(w * 0.25f, w * 0.42f, w * 0.5f, w * 0.12f, w * 0.5f, w * 0.12f)
+                path.close()
+                drawPath(path, color, style = stroke)
+            }
+            HomeTab.GAS -> {
+                path.moveTo(w * 0.5f, w * 0.12f)
+                path.cubicTo(w * 0.54f, w * 0.27f, w * 0.71f, w * 0.35f, w * 0.71f, w * 0.55f)
+                path.cubicTo(w * 0.71f, w * 0.74f, w * 0.62f, w * 0.88f, w * 0.5f, w * 0.88f)
+                path.cubicTo(w * 0.38f, w * 0.88f, w * 0.29f, w * 0.74f, w * 0.29f, w * 0.6f)
+                path.cubicTo(w * 0.29f, w * 0.5f, w * 0.34f, w * 0.43f, w * 0.38f, w * 0.38f)
+                path.cubicTo(w * 0.4f, w * 0.46f, w * 0.44f, w * 0.5f, w * 0.48f, w * 0.5f)
+                path.cubicTo(w * 0.46f, w * 0.33f, w * 0.5f, w * 0.25f, w * 0.5f, w * 0.12f)
+                path.close()
+                drawPath(path, color, style = stroke)
+            }
+        }
+    }
+}
+
+// Kafelek jak na stronie: nazwa, duża wartość w kolorze pomieszczenia, godzina i opcjonalnie bateria
+@Composable
+fun InfoTile(
+    label: String,
+    value: String,
+    valueColor: Color,
+    time: String,
+    stale: Boolean,
+    modifier: Modifier = Modifier,
+    battery: String? = null,
+    batteryLow: Boolean = false
+) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = modifier
+            .background(Panel, RoundedCornerShape(16.dp))
+            .padding(vertical = 16.dp, horizontal = 8.dp)
+    ) {
+        Text(
+            text = label.uppercase(),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.5.sp,
+            color = Gold
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(text = value, fontSize = 26.sp, fontWeight = FontWeight.Bold, color = valueColor)
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = if (stale) "$time · nieaktualne" else time,
+            fontSize = 11.sp,
+            color = if (stale) ErrorRed else Cream.copy(alpha = 0.7f)
+        )
+        if (battery != null) {
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "bateria $battery",
+                fontSize = 11.sp,
+                color = if (batteryLow) ErrorRed else Cream.copy(alpha = 0.8f)
+            )
+        }
+    }
+}
+
+// Kafelki pomieszczeń w siatce 2 x 2
+@Composable
+fun RoomTiles(rooms: RoomsData, tile: @Composable (Room, Modifier) -> Unit) {
+    ROOMS.chunked(2).forEach { pair ->
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 10.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            pair.forEach { room -> tile(room, Modifier.weight(1f)) }
+            if (pair.size == 1) Spacer(modifier = Modifier.weight(1f))
+        }
+    }
+}
+
+// Godzina pomiaru i czy jest nieaktualny
+private fun timeInfo(entry: RoomEntry?, failed: Boolean): Pair<String, Boolean> {
+    if (entry == null) return (if (failed) "błąd pobierania" else "brak danych") to false
+    val local = entry.timestamp.withZoneSameInstant(ZoneId.systemDefault())
+    val stale = entry.timestamp.isBefore(ZonedDateTime.now().minusMinutes(STALE_MINUTES))
+    return local.format(DateTimeFormatter.ofPattern("HH:mm")) to stale
+}
+
+// Stan baterii: procent albo stan z Tuya (low / middle / high) -> opis i czy niski
+private fun batteryInfo(raw: String?): Pair<String, Boolean>? {
+    if (raw.isNullOrBlank()) return null
+    raw.toFloatOrNull()?.let { return "${it.roundToInt()}%" to (it <= 20f) }
+    return when (raw.lowercase()) {
+        "high" -> "pełna" to false
+        "middle" -> "średnia" to false
+        "low" -> "niska" to true
+        else -> raw to false
+    }
+}
+
+// Wybór zakresu 24 / 12 / 6 h
+@Composable
+fun RangeChips(selected: TimeRange, onSelect: (TimeRange) -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp),
+        horizontalArrangement = Arrangement.SpaceEvenly
+    ) {
+        TimeRange.values().forEach { range ->
+            FilterChip(
+                selected = selected == range,
+                onClick = { onSelect(range) },
+                label = { Text(range.label, fontSize = 12.sp) },
+                colors = FilterChipDefaults.filterChipColors(
+                    containerColor = Color.Transparent,
+                    labelColor = Cream,
+                    selectedContainerColor = Plum,
+                    selectedLabelColor = Cream
+                ),
+                border = FilterChipDefaults.filterChipBorder(
+                    enabled = true,
+                    selected = selected == range,
+                    borderColor = Cream.copy(alpha = 0.5f),
+                    selectedBorderColor = Gold
+                )
+            )
+        }
+    }
+}
+
+@Composable
+fun SectionTitle(text: String) {
+    Text(
+        text = text,
+        fontSize = 24.sp,
+        fontWeight = FontWeight.Bold,
+        color = Cream,
+        modifier = Modifier.padding(bottom = 16.dp)
+    )
+}
+
+// Ładowanie albo błąd; zwraca true, gdy można pokazać dane
+@Composable
+private fun LoadingOrError(loading: Boolean, error: String?): Boolean {
+    when {
+        loading -> CircularProgressIndicator(color = Gold)
+        error != null -> Text(text = error, color = ErrorRed, fontSize = 16.sp)
+        else -> return true
+    }
+    return false
+}
+
+// Pomiary z wybranego zakresu, liczonego od najnowszego pomiaru ze wszystkich pomieszczeń
+private fun filterRange(rooms: RoomsData, range: TimeRange): Map<String, List<RoomEntry>> {
+    val latest = rooms.data.values.flatten().maxOfOrNull { it.timestamp } ?: return rooms.data
+    val cutoff = latest.minusHours(range.hours)
+    return rooms.data.mapValues { (_, entries) -> entries.filter { !it.timestamp.isBefore(cutoff) } }
+}
+
+// Zakładka Temperatura: kafelki z temperaturą i baterią, zakres, wykres każdego pomieszczenia
+@Composable
+fun TemperatureContent(rooms: RoomsData, range: TimeRange, onRange: (TimeRange) -> Unit) {
+    SectionTitle("Temperatura")
+    if (!LoadingOrError(rooms.loading, rooms.error)) return
+
+    RoomTiles(rooms) { room, mod ->
+        val entries = rooms.data[room.file].orEmpty()
+        val last = entries.lastOrNull()
+        val (time, stale) = timeInfo(last, room.file in rooms.failed)
+        val bat = batteryInfo(entries.lastOrNull { !it.battery.isNullOrBlank() }?.battery)
+        InfoTile(
+            label = room.name,
+            value = last?.let { String.format("%.1f°", it.temperature) } ?: "–",
+            valueColor = room.color,
+            time = time,
+            stale = stale,
+            modifier = mod,
+            battery = bat?.first,
+            batteryLow = bat?.second ?: false
+        )
+    }
+    RangeChips(range, onRange)
+    Spacer(modifier = Modifier.height(8.dp))
+
+    val filtered = remember(rooms, range) { filterRange(rooms, range) }
+    ROOMS.forEach { room ->
+        val entries = filtered[room.file].orEmpty()
+        if (entries.size >= 2) {
+            TemperatureChart(title = room.name, entries = entries, lineColor = room.color)
+        } else {
+            ChartPlaceholder(
+                title = room.name,
+                message = if (room.file in rooms.failed) "Nie udało się pobrać danych."
+                          else "Brak danych dla wybranego zakresu."
+            )
+        }
+        Spacer(modifier = Modifier.height(16.dp))
+    }
+}
+
+// Zakładka Wilgotność: kafelki z wilgotnością, zakres, wspólny wykres
+@Composable
+fun HumidityContent(rooms: RoomsData, range: TimeRange, onRange: (TimeRange) -> Unit) {
+    SectionTitle("Wilgotność")
+    if (!LoadingOrError(rooms.loading, rooms.error)) return
+
+    RoomTiles(rooms) { room, mod ->
+        val last = rooms.data[room.file].orEmpty().lastOrNull { it.humidity != null }
+        val (time, stale) = timeInfo(last, room.file in rooms.failed)
+        InfoTile(
+            label = room.name,
+            value = last?.humidity?.let { String.format("%.0f%%", it) } ?: "–",
+            valueColor = room.color,
+            time = time,
+            stale = stale,
+            modifier = mod
+        )
+    }
+    RangeChips(range, onRange)
+    Spacer(modifier = Modifier.height(8.dp))
+
+    val filtered = remember(rooms, range) { filterRange(rooms, range) }
+    val humiditySeries = ROOMS.mapNotNull { room ->
+        val points = filtered[room.file].orEmpty().filter { it.humidity != null }
+        if (points.size < 2) null else ChartSeries(
+            label = room.name,
+            times = points.map { it.timestamp.toEpochSecond() },
+            values = points.map { it.humidity!! },
+            color = room.color
+        )
+    }
+    if (humiditySeries.isEmpty()) {
+        ChartPlaceholder(title = "Wilgotność", message = "Brak danych dla wybranego zakresu.")
+    } else {
+        MultiLineChart(
+            title = "Wilgotność",
+            series = humiditySeries,
+            axisFormat = "%.0f%%",
+            valueFormat = "%.0f%%",
+            leftMargin = 44.dp,
+            minPad = 2f
+        )
+    }
+    Spacer(modifier = Modifier.height(16.dp))
+}
+
+// Zakładka Licznik gazu: bieżący odczyt, zużycie z 24 h i wykresy
+@Composable
+fun GasContent(gas: GasData) {
+    SectionTitle("Licznik gazu")
+    if (!LoadingOrError(gas.loading, gas.error)) return
+
+    val readings = gas.readings
+    val latest = readings.last()
+    val zone = ZoneId.systemDefault()
+    val cutoff = latest.timestamp.minusHours(24)
+    val level = remember(readings) { readings.filter { !it.timestamp.isBefore(cutoff) } }
+    // Chwilowe zużycie = różnica między kolejnymi odczytami (Δ m³)
+    val deltas = remember(readings) {
+        readings.zipWithNext().filter { (_, cur) -> !cur.timestamp.isBefore(cutoff) }
+    }
+    val usage24 = deltas.sumOf { (prev, cur) -> (cur.value - prev.value).coerceAtLeast(0.0) }
+
+    InfoTile(
+        label = "Bieżący odczyt",
+        value = String.format("%.3f m³", latest.value),
+        valueColor = Cream,
+        time = latest.timestamp.format(DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm")),
+        stale = false,
+        modifier = Modifier.fillMaxWidth()
+    )
+    Spacer(modifier = Modifier.height(10.dp))
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Panel, RoundedCornerShape(16.dp))
+            .padding(horizontal = 20.dp, vertical = 16.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(text = "Zużycie gazu w ostatnich 24 h", fontSize = 14.sp, color = Cream.copy(alpha = 0.7f))
+        Text(text = String.format("%.3f m³", usage24), fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Gold)
+    }
+    Spacer(modifier = Modifier.height(16.dp))
+
+    LineChart(
+        title = "Zmiana stanu licznika – ostatnie 24h (m³)",
+        times = level.map { it.timestamp.atZone(zone).toEpochSecond() },
+        rawValues = level.map { it.value.toFloat() },
+        lineColor = Color(0xFFEF6C00),
+        axisFormat = "%.3f",
+        valueFormat = "%.3f m³",
+        leftMargin = 52.dp,
+        minPad = 0.005f,
+        smoothingWindow = 1,
+        showMinMax = false
+    )
+    Spacer(modifier = Modifier.height(16.dp))
+    LineChart(
+        title = "Chwilowe zużycie gazu – ostatnie 24h (Δ m³)",
+        times = deltas.map { (_, cur) -> cur.timestamp.atZone(zone).toEpochSecond() },
+        rawValues = deltas.map { (prev, cur) -> (cur.value - prev.value).toFloat() },
+        lineColor = Color(0xFF8E24AA),
+        axisFormat = "%.3f",
+        valueFormat = "%.3f m³",
+        leftMargin = 52.dp,
+        minPad = 0.001f,
+        smoothingWindow = 1,
+        showMinMax = false
+    )
+    Spacer(modifier = Modifier.height(16.dp))
 }
 
 // Wykres temperatury jednego pomieszczenia (opakowanie ogólnego wykresu liniowego)
