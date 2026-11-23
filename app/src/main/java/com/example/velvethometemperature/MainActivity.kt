@@ -460,6 +460,79 @@ suspend fun loadDehum(): List<DehumEntry>? = try {
     null
 }
 
+// Stan sterownika pieca ENGO (plik piec.txt zapisywany przez Termometr co 5 min)
+data class ThermoEntry(
+    val timestamp: ZonedDateTime,
+    val temperature: Float,  // temperatura zmierzona przez termostat
+    val target: Float,       // nastawa
+    val heating: Boolean,    // czy piec grzeje
+    val mode: String,        // program / manual / holiday / temporary / boost / frost
+    val battery: Int?,       // bateria termostatu w %
+    val online: Boolean,     // łączność termostatu z odbiornikiem przy piecu
+    val fault: Int,          // bit 0 = błąd czujnika temperatury
+    val on: Boolean
+)
+
+// Format linii: "<czas>,<temp.>,<nastawa>,<grzeje 1/0>,<tryb>,<bateria>,<łączność 1/0>,<błędy>,<włączony 1/0>"
+fun parseThermoData(rawText: String): List<ThermoEntry> = rawText.lines().mapNotNull { line ->
+    val t = line.trim()
+    if (t.isEmpty() || t.startsWith("#")) return@mapNotNull null
+    try {
+        val p = t.split(",").map { it.trim() }
+        ThermoEntry(
+            timestamp = ZonedDateTime.parse(p[0], DateTimeFormatter.ISO_DATE_TIME),
+            temperature = p[1].toFloat(),
+            target = p[2].toFloat(),
+            heating = p[3] == "1",
+            mode = p.getOrNull(4).orEmpty(),
+            battery = p.getOrNull(5)?.toFloatOrNull()?.roundToInt(),
+            online = p.getOrNull(6) != "0",
+            fault = p.getOrNull(7)?.toIntOrNull() ?: 0,
+            on = p.getOrNull(8) != "0"
+        )
+    } catch (e: Exception) {
+        null
+    }
+}.sortedBy { it.timestamp }
+
+suspend fun loadThermo(): List<ThermoEntry>? = try {
+    withContext(Dispatchers.IO) {
+        parseThermoData(rawRetrofit().create(TemperatureApi::class.java).getRoomFile("piec.txt", System.currentTimeMillis()))
+    }
+} catch (e: Exception) {
+    null
+}
+
+// Okresy grzania (sekundy epoki) w przedziale [from, to]: każdy odczyt "grzeje" liczy się do następnego odczytu,
+// ale najwyżej 10 min (odczyty są co 5 min, dłuższa przerwa w danych nie jest liczona jako grzanie)
+private const val HEAT_GAP_S = 10 * 60L
+fun heatIntervals(entries: List<ThermoEntry>, from: Long, to: Long): List<Pair<Long, Long>> {
+    val out = mutableListOf<Pair<Long, Long>>()
+    entries.forEachIndexed { i, e ->
+        if (!e.heating) return@forEachIndexed
+        val start = e.timestamp.toEpochSecond()
+        val next = entries.getOrNull(i + 1)?.timestamp?.toEpochSecond() ?: to
+        val a = start.coerceAtLeast(from)
+        val b = minOf(next, start + HEAT_GAP_S, to)
+        if (b <= a) return@forEachIndexed
+        val prev = out.lastOrNull()
+        if (prev != null && a <= prev.second) out[out.lastIndex] = prev.first to maxOf(prev.second, b)
+        else out.add(a to b)
+    }
+    return out
+}
+
+fun formatDuration(seconds: Long): String {
+    val m = (seconds / 60).toInt()
+    return if (m >= 60) "${m / 60} h ${m % 60} min" else "$m min"
+}
+
+private val THERMO_MODES = mapOf(
+    "program" to "harmonogram", "manual" to "ręczny", "holiday" to "urlop",
+    "temporary" to "chwilowy", "boost" to "boost", "frost" to "przeciwzamrożeniowy"
+)
+private val HeatOrange = Color(0xFFEF6C00)
+
 suspend fun loadGas(): GasData = try {
     val raw = withContext(Dispatchers.IO) { rawRetrofit().create(GasApi::class.java).getReadings(System.currentTimeMillis()) }
     val readings = parseGasReadings(raw)
@@ -476,6 +549,7 @@ fun HomeScreen() {
     var rooms by remember { mutableStateOf(RoomsData()) }
     var gas by remember { mutableStateOf(GasData()) }
     var dehum by remember { mutableStateOf<List<DehumEntry>>(emptyList()) }
+    var thermo by remember { mutableStateOf<List<ThermoEntry>>(emptyList()) }
 
     // Dane odświeżane co minutę, ale tylko gdy aplikacja jest na ekranie (w tle nic nie pobiera).
     // Po powrocie do aplikacji odświeżenie następuje od razu.
@@ -495,6 +569,7 @@ fun HomeScreen() {
                         }
                     }
                     launch { loadDehum()?.let { dehum = it } }
+                    launch { loadThermo()?.let { thermo = it } }
                     launch {
                         val fresh = loadGas()
                         // przy chwilowym błędzie zostają poprzednie odczyty
@@ -537,7 +612,7 @@ fun HomeScreen() {
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 when (tab) {
-                    HomeTab.TEMPERATURE -> TemperatureContent(rooms, selectedRange) { selectedRange = it }
+                    HomeTab.TEMPERATURE -> TemperatureContent(rooms, thermo, selectedRange) { selectedRange = it }
                     HomeTab.HUMIDITY -> HumidityContent(rooms, dehum, selectedRange) { selectedRange = it }
                     HomeTab.GAS -> GasContent(gas)
                 }
@@ -766,7 +841,7 @@ private fun filterRange(rooms: RoomsData, range: TimeRange): Map<String, List<Ro
 
 // Zakładka Temperatura: kafelki z temperaturą i baterią, zakres, wykres każdego pomieszczenia
 @Composable
-fun TemperatureContent(rooms: RoomsData, range: TimeRange, onRange: (TimeRange) -> Unit) {
+fun TemperatureContent(rooms: RoomsData, thermo: List<ThermoEntry>, range: TimeRange, onRange: (TimeRange) -> Unit) {
     SectionTitle("Temperatura")
     if (!LoadingOrError(rooms.loading, rooms.error)) return
 
@@ -786,6 +861,7 @@ fun TemperatureContent(rooms: RoomsData, range: TimeRange, onRange: (TimeRange) 
             batteryLow = bat?.second ?: false
         )
     }
+    ThermostatCard(thermo)
     RangeChips(range, onRange)
     Spacer(modifier = Modifier.height(8.dp))
 
@@ -803,6 +879,7 @@ fun TemperatureContent(rooms: RoomsData, range: TimeRange, onRange: (TimeRange) 
         }
         Spacer(modifier = Modifier.height(16.dp))
     }
+    ThermostatChart(rooms, thermo, range)
 }
 
 // Zakładka Wilgotność: kafelki z wilgotnością, zakres, wspólny wykres
@@ -938,6 +1015,140 @@ fun DehumidifierCard(entries: List<DehumEntry>) {
             }
         }
     }
+}
+
+// Kafelek sterownika pieca: temperatura, nastawa, czas grzania w 24 h, tryb, bateria, alarmy
+@Composable
+fun ThermostatCard(entries: List<ThermoEntry>) {
+    val last = entries.lastOrNull() ?: return   // bez danych kafelka nie pokazujemy
+    val (state, stateColor) = when {
+        !last.on -> "Wyłączony" to Cream.copy(alpha = 0.6f)
+        !last.online -> "Brak łączności" to ErrorRed
+        last.heating -> "Grzeje" to HeatOrange
+        else -> "Nie grzeje" to Cream.copy(alpha = 0.75f)
+    }
+    val nowS = System.currentTimeMillis() / 1000
+    val heated24 = heatIntervals(entries, nowS - 24 * 3600, nowS).sumOf { it.second - it.first }
+    val stale = last.timestamp.isBefore(ZonedDateTime.now().minusMinutes(STALE_MINUTES))
+    val time = last.timestamp.withZoneSameInstant(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("HH:mm"))
+    val info = listOfNotNull(
+        "tryb " + (THERMO_MODES[last.mode] ?: last.mode),
+        last.battery?.let { "bateria $it%" },
+        if (stale) "$time · nieaktualne" else time
+    ).joinToString(" · ")
+    val alerts = buildList {
+        if (!last.online) add("Termostat nie ma łączności z odbiornikiem przy piecu")
+        if ((last.fault and 1) != 0) add("Błąd czujnika temperatury")
+        if (last.battery != null && last.battery <= 20) add("Słaba bateria termostatu – wymień baterie")
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 10.dp)
+            .background(Panel, RoundedCornerShape(16.dp))
+            .padding(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("STEROWNIK PIECA", fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp, color = Gold)
+            Text(state, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = stateColor)
+        }
+        Spacer(modifier = Modifier.height(12.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(String.format("%.1f°", last.temperature), fontSize = 26.sp, fontWeight = FontWeight.Bold, color = HeatOrange)
+                Text("temperatura", fontSize = 11.sp, color = Cream.copy(alpha = 0.7f))
+            }
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(String.format("%.1f°", last.target), fontSize = 26.sp, fontWeight = FontWeight.Bold, color = Cream)
+                Text("nastawa", fontSize = 11.sp, color = Cream.copy(alpha = 0.7f))
+            }
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(formatDuration(heated24), fontSize = 20.sp, fontWeight = FontWeight.Bold, color = Gold,
+                    modifier = Modifier.padding(top = 4.dp))
+                Text("grzanie w 24 h", fontSize = 11.sp, color = Cream.copy(alpha = 0.7f), modifier = Modifier.padding(top = 3.dp))
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = info,
+            fontSize = 12.sp,
+            color = if (stale) ErrorRed else Cream.copy(alpha = 0.75f),
+            modifier = Modifier.align(Alignment.CenterHorizontally)
+        )
+        if (alerts.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(ErrorRed.copy(alpha = 0.15f), RoundedCornerShape(10.dp))
+                    .padding(8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(alerts.joinToString(" · "), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = ErrorRed,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center)
+            }
+        }
+    }
+}
+
+// Wykres sterownika pieca: temperatura, nastawa i pomarańczowe pasy w okresach grzania, pod spodem czas grzania
+@Composable
+fun ThermostatChart(rooms: RoomsData, thermo: List<ThermoEntry>, range: TimeRange) {
+    if (thermo.isEmpty()) return
+    val data = remember(thermo, rooms, range) {
+        // koniec osi jak na pozostałych wykresach: najnowszy pomiar (z pomieszczeń albo sterownika)
+        val roomsLatest = rooms.data.values.flatten().maxOfOrNull { it.timestamp }
+        val thermoLatest = thermo.last().timestamp
+        val latest = if (roomsLatest != null && roomsLatest.isAfter(thermoLatest)) roomsLatest else thermoLatest
+        val to = latest.toEpochSecond()
+        val from = to - range.hours * 3600
+        val points = thermo.filter { it.timestamp.toEpochSecond() >= from }
+        Triple(points, heatIntervals(thermo, from, to), from)
+    }
+    val (points, bands, _) = data
+    if (points.size < 2) {
+        ChartPlaceholder(title = "Sterownik pieca", message = "Brak danych dla wybranego zakresu.")
+    } else {
+        val times = points.map { it.timestamp.toEpochSecond() }
+        MultiLineChart(
+            title = "Sterownik pieca",
+            series = listOf(
+                ChartSeries("Temperatura", times, points.map { it.temperature }, HeatOrange),
+                ChartSeries("Nastawa", times, points.map { it.target }, Color(0xFFE0B04A))
+            ),
+            axisFormat = "%.1f°C",
+            valueFormat = "%.1f°C",
+            leftMargin = 44.dp,
+            minPad = 0.5f,
+            smoothingWindow = 1,
+            bands = bands,
+            bandLabel = "Piec grzeje",
+            footer = {
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Grzanie w wybranym zakresie",
+                    fontSize = 12.sp,
+                    color = Color(0xFF3A3A3A).copy(alpha = 0.7f),
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+                Text(
+                    text = formatDuration(bands.sumOf { it.second - it.first }),
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = HeatOrange,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                )
+            }
+        )
+    }
+    Spacer(modifier = Modifier.height(16.dp))
 }
 
 // Zakładka Licznik gazu: bieżący odczyt, zużycie z 24 h i wykresy
@@ -1094,7 +1305,11 @@ fun MultiLineChart(
     leftMargin: Dp = 44.dp,
     minPad: Float = 0.5f,
     smoothingWindow: Int = 7,
-    showMinMax: Boolean = true
+    showMinMax: Boolean = true,
+    bands: List<Pair<Long, Long>> = emptyList(),   // pasy w tle (np. okresy grzania), sekundy epoki
+    bandLabel: String? = null,                     // opis pasów w legendzie
+    bandColor: Color = Color(0x21EF6C00),
+    footer: (@Composable () -> Unit)? = null       // dodatkowa treść pod legendą
 ) {
     val darkText = Color(0xFF3A3A3A)
     val textMeasurer = rememberTextMeasurer()
@@ -1246,6 +1461,13 @@ fun MultiLineChart(
                 )
             }
 
+            // Pasy w tle (pod liniami), przycięte do zakresu osi czasu
+            bands.forEach { (a, b) ->
+                val xa = left + ((a.coerceIn(t0, t1) - t0).toFloat() / span) * chartWidth
+                val xb = left + ((b.coerceIn(t0, t1) - t0).toFloat() / span) * chartWidth
+                if (xb > xa) drawRect(bandColor, topLeft = Offset(xa, top), size = Size(xb - xa, chartHeight))
+            }
+
             val yLow = top
             val yHigh = top + chartHeight
             smoothed.forEachIndexed { si, s ->
@@ -1355,6 +1577,17 @@ fun MultiLineChart(
                         Text(text = s.label, fontSize = 12.sp, color = darkText.copy(alpha = 0.8f))
                     }
                 }
+                if (bandLabel != null && bands.isNotEmpty()) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(width = 12.dp, height = 10.dp)
+                                .background(bandColor.copy(alpha = 0.35f), RoundedCornerShape(2.dp))
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(text = bandLabel, fontSize = 12.sp, color = darkText.copy(alpha = 0.8f))
+                    }
+                }
             }
         } else if (showMinMax) {
             Spacer(modifier = Modifier.height(8.dp))
@@ -1366,6 +1599,7 @@ fun MultiLineChart(
                 lineColor = series.first().color
             )
         }
+        footer?.invoke()
     }
 }
 
