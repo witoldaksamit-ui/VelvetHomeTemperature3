@@ -382,6 +382,7 @@ private val Gold = Color(0xFFFFC96B)
 private val Panel = Color(0xFF2A0B1C)
 private val Plum = Color(0xFF9C2A5E)
 private val ErrorRed = Color(0xFFFF8A80)
+private val GoodGreen = Color(0xFF7BD88F)
 private const val STALE_MINUTES = 60L
 private const val REFRESH_MS = 60_000L   // automatyczne odświeżanie danych co minutę   // odczyt starszy niż godzina jest oznaczany jako nieaktualny
 
@@ -419,6 +420,46 @@ fun mergeRooms(old: RoomsData, new: RoomsData): RoomsData {
     )
 }
 
+// Stan osuszacza w pralni (plik osuszacz.txt zapisywany przez Termometr co 5 min)
+data class DehumEntry(
+    val timestamp: ZonedDateTime,
+    val on: Boolean,
+    val mode: Int,          // 0 = wilgotność docelowa (DRY / COMFORT), 1 = ciągłe (CONT albo TURBO)
+    val target: Int,        // wilgotność docelowa w %
+    val fan: Int,           // 0 = niski, 2 = wysoki
+    val humidity: Float,    // wilgotność zmierzona przez osuszacz w %
+    val fault: Int          // bity 0-5 = P1, E3, E5, EH, E1, E2; bit 6 (64) = pełny zbiornik
+)
+
+// Format linii: "<czas>,<włączony 1/0>,<tryb>,<cel %>,<wentylator>,<wilgotność %>,<błędy>"
+fun parseDehumData(rawText: String): List<DehumEntry> = rawText.lines().mapNotNull { line ->
+    val t = line.trim()
+    if (t.isEmpty() || t.startsWith("#")) return@mapNotNull null
+    try {
+        val p = t.split(",").map { it.trim() }
+        DehumEntry(
+            timestamp = ZonedDateTime.parse(p[0], DateTimeFormatter.ISO_DATE_TIME),
+            on = p[1] == "1",
+            mode = p[2].toInt(),
+            target = p[3].toInt(),
+            fan = p[4].toInt(),
+            humidity = p[5].toFloat(),
+            fault = p.getOrNull(6)?.toIntOrNull() ?: 0
+        )
+    } catch (e: Exception) {
+        null
+    }
+}.sortedBy { it.timestamp }
+
+// null przy błędzie pobierania (zostają wtedy poprzednie dane)
+suspend fun loadDehum(): List<DehumEntry>? = try {
+    withContext(Dispatchers.IO) {
+        parseDehumData(rawRetrofit().create(TemperatureApi::class.java).getRoomFile("osuszacz.txt", System.currentTimeMillis()))
+    }
+} catch (e: Exception) {
+    null
+}
+
 suspend fun loadGas(): GasData = try {
     val raw = withContext(Dispatchers.IO) { rawRetrofit().create(GasApi::class.java).getReadings(System.currentTimeMillis()) }
     val readings = parseGasReadings(raw)
@@ -434,6 +475,7 @@ fun HomeScreen() {
     var selectedRange by rememberSaveable { mutableStateOf(TimeRange.LAST_24H) }
     var rooms by remember { mutableStateOf(RoomsData()) }
     var gas by remember { mutableStateOf(GasData()) }
+    var dehum by remember { mutableStateOf<List<DehumEntry>>(emptyList()) }
 
     // Dane odświeżane co minutę, ale tylko gdy aplikacja jest na ekranie (w tle nic nie pobiera).
     // Po powrocie do aplikacji odświeżenie następuje od razu.
@@ -452,6 +494,7 @@ fun HomeScreen() {
                             runCatching { VelvetWidget().updateAll(context) }
                         }
                     }
+                    launch { loadDehum()?.let { dehum = it } }
                     launch {
                         val fresh = loadGas()
                         // przy chwilowym błędzie zostają poprzednie odczyty
@@ -495,7 +538,7 @@ fun HomeScreen() {
             ) {
                 when (tab) {
                     HomeTab.TEMPERATURE -> TemperatureContent(rooms, selectedRange) { selectedRange = it }
-                    HomeTab.HUMIDITY -> HumidityContent(rooms, selectedRange) { selectedRange = it }
+                    HomeTab.HUMIDITY -> HumidityContent(rooms, dehum, selectedRange) { selectedRange = it }
                     HomeTab.GAS -> GasContent(gas)
                 }
             }
@@ -764,7 +807,7 @@ fun TemperatureContent(rooms: RoomsData, range: TimeRange, onRange: (TimeRange) 
 
 // Zakładka Wilgotność: kafelki z wilgotnością, zakres, wspólny wykres
 @Composable
-fun HumidityContent(rooms: RoomsData, range: TimeRange, onRange: (TimeRange) -> Unit) {
+fun HumidityContent(rooms: RoomsData, dehum: List<DehumEntry>, range: TimeRange, onRange: (TimeRange) -> Unit) {
     SectionTitle("Wilgotność")
     if (!LoadingOrError(rooms.loading, rooms.error)) return
 
@@ -780,11 +823,12 @@ fun HumidityContent(rooms: RoomsData, range: TimeRange, onRange: (TimeRange) -> 
             modifier = mod
         )
     }
+    DehumidifierCard(dehum)
     RangeChips(range, onRange)
     Spacer(modifier = Modifier.height(8.dp))
 
     val filtered = remember(rooms, range) { filterRange(rooms, range) }
-    val humiditySeries = ROOMS.mapNotNull { room ->
+    val roomSeries = ROOMS.mapNotNull { room ->
         val points = filtered[room.file].orEmpty().filter { it.humidity != null }
         if (points.size < 2) null else ChartSeries(
             label = room.name,
@@ -793,6 +837,19 @@ fun HumidityContent(rooms: RoomsData, range: TimeRange, onRange: (TimeRange) -> 
             color = room.color
         )
     }
+    // Wilgotność zmierzona przez osuszacz jako dodatkowa (złota) linia, w tym samym zakresie czasu
+    val dehumSeries = remember(dehum, rooms, range) {
+        val latest = rooms.data.values.flatten().maxOfOrNull { it.timestamp } ?: dehum.lastOrNull()?.timestamp
+        val points = if (latest == null) emptyList()
+                     else dehum.filter { !it.timestamp.isBefore(latest.minusHours(range.hours)) }
+        if (points.size < 2) null else ChartSeries(
+            label = "Osuszacz",
+            times = points.map { it.timestamp.toEpochSecond() },
+            values = points.map { it.humidity },
+            color = Gold
+        )
+    }
+    val humiditySeries = roomSeries + listOfNotNull(dehumSeries)
     if (humiditySeries.isEmpty()) {
         ChartPlaceholder(title = "Wilgotność", message = "Brak danych dla wybranego zakresu.")
     } else {
@@ -806,6 +863,81 @@ fun HumidityContent(rooms: RoomsData, range: TimeRange, onRange: (TimeRange) -> 
         )
     }
     Spacer(modifier = Modifier.height(16.dp))
+}
+
+// Kafelek osuszacza: stan, wilgotność zmierzona i docelowa, tryb, wentylator, alarmy
+@Composable
+fun DehumidifierCard(entries: List<DehumEntry>) {
+    val last = entries.lastOrNull() ?: return   // bez danych kafelka nie pokazujemy
+    val reached = last.mode == 0 && last.humidity <= last.target
+    val state = when {
+        !last.on -> "Wyłączony"
+        last.mode == 1 -> "Osusza ciągle"
+        reached -> "Cel osiągnięty"
+        else -> "Osusza"
+    }
+    val stale = last.timestamp.isBefore(ZonedDateTime.now().minusMinutes(STALE_MINUTES))
+    val time = last.timestamp.withZoneSameInstant(ZoneId.systemDefault()).format(DateTimeFormatter.ofPattern("HH:mm"))
+    val modeText = when {
+        last.mode == 1 -> "tryb CONT / TURBO"
+        last.target == 60 -> "tryb DRY / COMFORT"
+        else -> "tryb DRY"
+    }
+    val info = listOf(modeText, "wentylator " + if (last.fan >= 2) "wysoki" else "niski",
+        if (stale) "$time · nieaktualne" else time).joinToString(" · ")
+    val alerts = buildList {
+        if ((last.fault and 64) != 0) add("Pełny zbiornik – opróżnij osuszacz")
+        listOf("P1", "E3", "E5", "EH", "E1", "E2").forEachIndexed { bit, code ->
+            if ((last.fault and (1 shl bit)) != 0) add("Błąd $code")
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 10.dp)
+            .background(Panel, RoundedCornerShape(16.dp))
+            .padding(16.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text("OSUSZACZ · PRALNIA", fontSize = 12.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp, color = Gold)
+            Text(state, fontSize = 13.sp, fontWeight = FontWeight.Bold, color = if (last.on) GoodGreen else Cream.copy(alpha = 0.6f))
+        }
+        Spacer(modifier = Modifier.height(12.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceAround) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("${last.humidity.roundToInt()}%", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Gold)
+                Text("wilgotność zmierzona", fontSize = 11.sp, color = Cream.copy(alpha = 0.7f))
+            }
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(if (last.mode == 1) "ciągłe" else "${last.target}%", fontSize = 28.sp, fontWeight = FontWeight.Bold, color = Cream)
+                Text("wilgotność docelowa", fontSize = 11.sp, color = Cream.copy(alpha = 0.7f))
+            }
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = info,
+            fontSize = 12.sp,
+            color = if (stale) ErrorRed else Cream.copy(alpha = 0.75f),
+            modifier = Modifier.align(Alignment.CenterHorizontally)
+        )
+        if (alerts.isNotEmpty()) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(ErrorRed.copy(alpha = 0.15f), RoundedCornerShape(10.dp))
+                    .padding(8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(alerts.joinToString(" · "), fontSize = 13.sp, fontWeight = FontWeight.Bold, color = ErrorRed)
+            }
+        }
+    }
 }
 
 // Zakładka Licznik gazu: bieżący odczyt, zużycie z 24 h i wykresy
